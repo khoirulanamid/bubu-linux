@@ -3,7 +3,9 @@
 Nusa for Linux — A living, interactive notch for Linux desktop.
 Inspired by Nusa (https://rama2555.github.io/nusa/).
 
-Engine v3.1:
+Engine v3.2:
+- Singing Companion Mascot: When music plays, the top notch mascot happily sings (eyes ^ ^, bobbing mouth o ↔ O, floating ♪ note).
+- Detachable Floating Music Island: A draggable mini-player capsule that can be placed anywhere on screen and toggled/hidden anytime.
 - Auto App Detection: Spotify, YouTube, VLC, Firefox, or Local Player with real vector branding.
 - Dynamic Animated "Candle Suara" (Audio Equalizer Visualizer): Real-time harmonic audio wave bars.
 - Physical micro-window geometry: 166x30 when idle, strictly bounded to the visible pill (zero early activation).
@@ -43,7 +45,9 @@ DEFAULT_SETTINGS = {
     "water_current": 500,
     "water_date": time.strftime("%Y-%m-%d"),
     "theme_accent": [0.55, 0.50, 0.95], # Nusa Vibrant Purple
-    "start_with_system": True
+    "start_with_system": True,
+    "floating_player_enabled": True,
+    "floating_player_pos": None
 }
 
 def load_settings():
@@ -192,6 +196,188 @@ class MprisController:
             except Exception as e:
                 print("[MPRIS] Previous error:", e)
 
+# ─── Floating Detachable Music Island ────────────────────────────────
+class FloatingMusicIsland(Gtk.Window):
+    def __init__(self, main_notch):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.main_notch = main_notch
+        self.set_name("nusa-floating-island")
+        self.set_title("Nusa Music Island")
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+
+        self.W = 340
+        self.H = 54
+        self.set_default_size(self.W, self.H)
+
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+        self.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK |
+            Gdk.EventMask.BUTTON_RELEASE_MASK |
+            Gdk.EventMask.POINTER_MOTION_MASK
+        )
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_button_press)
+        self.connect("button-release-event", self.on_button_release)
+
+        # Positioning: Restore saved position or place at bottom-right
+        geom = main_notch.get_monitor_geometry()
+        saved_pos = main_notch.settings.get("floating_player_pos")
+        if saved_pos and len(saved_pos) == 2:
+            self.move(int(saved_pos[0]), int(saved_pos[1]))
+        else:
+            default_x = geom.x + geom.width - self.W - 35
+            default_y = geom.y + geom.height - self.H - 65
+            self.move(default_x, default_y)
+
+    def on_button_press(self, widget, event):
+        x, y = event.x, event.y
+
+        # 1. Close / Hide Button (Top-Right: X > 316, Y < 24)
+        if x >= 316 and y <= 24:
+            self.main_notch.settings["floating_player_enabled"] = False
+            save_settings(self.main_notch.settings)
+            self.hide()
+            return True
+
+        # 2. Play / Pause Button (Around X=268, Y=27, r=14)
+        if 254 <= x <= 282 and 13 <= y <= 41:
+            self.main_notch.mpris.play_pause(self.main_notch.active_player)
+            return True
+
+        # 3. Next Button (Around X=296, Y=27, r=12)
+        if 284 <= x <= 310 and 15 <= y <= 39:
+            self.main_notch.mpris.next(self.main_notch.active_player)
+            return True
+
+        # 4. Draggable anywhere else on the pill
+        if event.button == 1:
+            self.begin_move_drag(event.button, int(event.x_root), int(event.y_root), event.time)
+            return True
+
+        return True
+
+    def on_button_release(self, widget, event):
+        # Save position to settings
+        pos = self.get_position()
+        self.main_notch.settings["floating_player_pos"] = [pos[0], pos[1]]
+        save_settings(self.main_notch.settings)
+        return False
+
+    def on_draw(self, widget, cr):
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+
+        w, h, r = float(self.W), float(self.H), 27.0
+        player = self.main_notch.active_player
+        source = self.main_notch.detect_source(player)
+        scolor = source['color']
+        is_playing = (player and player.get('status') == 'Playing')
+
+        # 1. Floating Pill Capsule Background
+        cr.new_path()
+        cr.new_sub_path()
+        cr.arc(w - r, r, r, -math.pi/2, math.pi/2)
+        cr.arc(r, h - r, r, math.pi/2, 3*math.pi/2)
+        cr.close_path()
+
+        grad = cairo.LinearGradient(0, 0, 0, h)
+        grad.add_color_stop_rgba(0, 0.05, 0.06, 0.10, 0.96)
+        grad.add_color_stop_rgba(1, 0.08, 0.09, 0.15, 0.98)
+        cr.set_source(grad)
+        cr.fill_preserve()
+
+        # Dynamic Ambient Border
+        cr.set_source_rgba(scolor[0], scolor[1], scolor[2], 0.70)
+        cr.set_line_width(1.4)
+        cr.stroke()
+
+        # 2. Left: Logo Badge (34x34 at X=10, Y=10)
+        card_x, card_y, card_s, card_r = 10.0, 10.0, 34.0, 9.0
+        cr.save()
+        cr.new_path()
+        cr.new_sub_path()
+        cr.arc(card_x + card_s - card_r, card_y + card_r, card_r, -math.pi/2, 0)
+        cr.arc(card_x + card_s - card_r, card_y + card_s - card_r, card_r, 0, math.pi/2)
+        cr.arc(card_x + card_r, card_y + card_s - card_r, card_r, math.pi/2, math.pi)
+        cr.arc(card_x + card_r, card_y + card_r, card_r, math.pi, 3*math.pi/2)
+        cr.close_path()
+        cr.set_source_rgba(0.12, 0.14, 0.22, 0.92)
+        cr.fill_preserve()
+        cr.set_source_rgba(scolor[0], scolor[1], scolor[2], 0.4)
+        cr.set_line_width(1.1)
+        cr.stroke()
+
+        self.main_notch.draw_source_logo(cr, card_x + card_s / 2.0, card_y + card_s / 2.0, card_s, source['type'])
+        cr.restore()
+
+        # 3. Middle: Text Info
+        layout = PangoCairo.create_layout(cr)
+        title = player.get('title') if player else "Tidak ada musik"
+        artist = player.get('artist') if player else "Nusa Floating Player"
+
+        if len(title) > 22:
+            display_title = title[:20] + ".."
+        else:
+            display_title = title
+
+        if len(artist) > 26:
+            display_artist = artist[:24] + ".."
+        else:
+            display_artist = artist
+
+        # Title
+        font = Pango.FontDescription("Ubuntu, Sans Bold 10")
+        layout.set_font_description(font)
+        layout.set_text(display_title, -1)
+        cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+        cr.move_to(52, 11)
+        PangoCairo.show_layout(cr, layout)
+
+        # Artist
+        font = Pango.FontDescription("Ubuntu, Sans 8.5")
+        layout.set_font_description(font)
+        layout.set_text(display_artist, -1)
+        cr.set_source_rgba(0.68, 0.72, 0.85, 0.85)
+        cr.move_to(52, 29)
+        PangoCairo.show_layout(cr, layout)
+
+        # 4. Animated Candle Suara (Visualizer) at X=232, Y=27
+        self.main_notch.draw_visualizer_bars(
+            cr, cx=232, cy=27, num_bars=5,
+            is_playing=is_playing, color=scolor,
+            max_h=20.0, bar_w=2.8, bar_gap=2.2, alpha=1.0
+        )
+
+        # 5. Play / Pause Button at X=268, Y=27
+        symbol = "⏸" if is_playing else "▶"
+        self.main_notch.draw_circle_btn(cr, bx=268, by=27, r=13, symbol=symbol, highlight=True, alpha=1.0)
+
+        # 6. Next Button at X=296, Y=27
+        self.main_notch.draw_circle_btn(cr, bx=296, by=27, r=11, symbol="⏭", alpha=1.0)
+
+        # 7. Close / Hide Button at X=324, Y=14
+        cr.save()
+        cr.new_path()
+        layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8"))
+        layout.set_text("✕", -1)
+        cw, ch = layout.get_pixel_size()
+        cr.set_source_rgba(0.65, 0.68, 0.80, 0.75)
+        cr.move_to(324 - cw / 2.0, 14 - ch / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+        return False
+
 # ─── Main Nusa Living Notch ─────────────────────────────────────────
 class NusaNotch(Gtk.Window):
     def __init__(self):
@@ -219,7 +405,7 @@ class NusaNotch(Gtk.Window):
         self.last_tick_us = 0
         self.is_expanded = False
 
-        # Mascot States: AWAKE, BLINK, HAPPY, SLEEPY
+        # Mascot States: AWAKE, BLINK, HAPPY, SLEEPY, SINGING
         self.mascot_state = "AWAKE"
         self.blink_progress = 0.0
         self.is_blinking = False
@@ -273,6 +459,11 @@ class NusaNotch(Gtk.Window):
         self.connect("drag-motion", self.on_drag_motion)
         self.connect("drag-leave", self.on_drag_leave)
         self.connect("drag-data-received", self.on_drag_drop)
+
+        # Floating Mini Player Island
+        self.floating_player = FloatingMusicIsland(self)
+        if self.settings.get("floating_player_enabled", True):
+            self.floating_player.show_all()
 
         # Background tickers
         GLib.timeout_add(1000, self.on_second_tick)
@@ -479,15 +670,20 @@ class NusaNotch(Gtk.Window):
             self.mascot_state = "AWAKE"
 
         self.queue_draw()
+        if self.floating_player and self.floating_player.get_visible():
+            self.floating_player.queue_draw()
         return True
 
     def on_fast_tick(self):
         now = time.time()
 
         # Animate Audio Visualizer Candle when playing
-        if self.active_player and self.active_player.get('status') == 'Playing':
+        is_playing = (self.active_player and self.active_player.get('status') == 'Playing')
+        if is_playing:
             self.visualizer_phase = (self.visualizer_phase + 0.18) % (math.pi * 20.0)
             self.queue_draw()
+            if self.floating_player and self.floating_player.get_visible():
+                self.floating_player.queue_draw()
 
         if self.mascot_state == "AWAKE":
             if not self.is_blinking and now >= self.next_blink_time:
@@ -669,9 +865,22 @@ class NusaNotch(Gtk.Window):
 
         # 2. Content Interactions
         if self.active_tab == 0: # Music
-            btn_y = 168
+            # Toggle Floating Player button at Y=145
             cx = self.EXP_W / 2.0
-            if btn_y - 22 <= y <= btn_y + 22:
+            if 138 <= y <= 160 and cx - 110 <= x <= cx + 110:
+                is_on = not self.settings.get("floating_player_enabled", True)
+                self.settings["floating_player_enabled"] = is_on
+                save_settings(self.settings)
+                if is_on:
+                    self.floating_player.show_all()
+                else:
+                    self.floating_player.hide()
+                self.queue_draw()
+                return True
+
+            # Playback controls at Y=188
+            btn_y = 188
+            if btn_y - 20 <= y <= btn_y + 20:
                 if cx - 65 <= x <= cx - 25:
                     self.mpris.previous(self.active_player)
                     return True
@@ -806,31 +1015,28 @@ class NusaNotch(Gtk.Window):
         cr.new_path()
         layout = PangoCairo.create_layout(cr)
 
-        # 1. Active Music Playing in Idle Pill
-        if self.active_player and self.active_player.get('status') == 'Playing' and self.active_player.get('title'):
+        is_music_playing = (self.active_player and self.active_player.get('status') == 'Playing')
+
+        # 1. When Music is Playing: Top Notch shows the CUTE SINGING MASCOT!
+        if is_music_playing:
             source = self.detect_source(self.active_player)
             scolor = source['color']
-            title = self.active_player['title']
-            if len(title) > 15:
-                title = title[:13] + ".."
 
-            # Mini source indicator on left
-            cr.new_path()
-            cr.arc(cx - 62, cy, 3.5, 0, 2 * math.pi)
-            cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.95)
-            cr.fill()
-
-            # Track title
-            font = Pango.FontDescription("Ubuntu, Sans Bold 9")
+            # Digital Clock on Left
+            font = Pango.FontDescription("Ubuntu, Sans Bold 9.5")
             layout.set_font_description(font)
-            layout.set_text(title, -1)
+            current_time = time.strftime("%H:%M")
+            layout.set_text(current_time, -1)
             lw, lh = layout.get_pixel_size()
-            cr.set_source_rgba(0.92, 0.95, 1.0, alpha * 0.95)
-            cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
+            cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.90)
+            cr.move_to(cx - 62, cy - lh / 2.0)
             PangoCairo.show_layout(cr, layout)
 
-            # Mini 3-bar animated candle visualizer on right
-            self.draw_visualizer_bars(cr, cx + 62, cy, num_bars=3, is_playing=True, color=scolor, max_h=12.0, bar_w=2.2, bar_gap=2.0, alpha=alpha)
+            # Cute Singing Mascot in Center!
+            self.draw_singing_mascot(cr, cx, cy, alpha)
+
+            # Mini 3-bar animated candle visualizer on Right
+            self.draw_visualizer_bars(cr, cx + 56, cy, num_bars=3, is_playing=True, color=scolor, max_h=12.0, bar_w=2.2, bar_gap=2.0, alpha=alpha)
             return
 
         # 2. Pomodoro Active
@@ -861,6 +1067,50 @@ class NusaNotch(Gtk.Window):
             cr.set_source_rgba(0.95, 0.96, 1.0, alpha * 0.95)
             cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
             PangoCairo.show_layout(cr, layout)
+
+    def draw_singing_mascot(self, cr, cx, cy, alpha=1.0):
+        spacing = 9.5
+        rx = 3.2
+
+        cr.save()
+        cr.new_path()
+
+        # Happy Singing Eyes ^ ^
+        cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
+        cr.set_line_width(1.8)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+
+        cr.new_sub_path()
+        cr.arc(cx - spacing, cy - 2, rx, math.pi + 0.35, 2 * math.pi - 0.35)
+        cr.stroke()
+
+        cr.new_sub_path()
+        cr.arc(cx + spacing, cy - 2, rx, math.pi + 0.35, 2 * math.pi - 0.35)
+        cr.stroke()
+
+        # Cute Singing Mouth o ↔ O bobbing with music
+        mouth_scale = 1.0 + 0.6 * math.sin(self.visualizer_phase * 2.0)
+        cr.new_sub_path()
+        cr.save()
+        cr.translate(cx, cy + 4.5)
+        cr.scale(1.0, mouth_scale)
+        cr.arc(0, 0, 2.4, 0, 2 * math.pi)
+        cr.restore()
+        cr.set_source_rgba(0.98, 0.50, 0.60, alpha * 0.95) # soft cute coral/pink
+        cr.fill()
+
+        # Floating Musical Note ♪
+        layout = PangoCairo.create_layout(cr)
+        font = Pango.FontDescription("Ubuntu, Sans Bold 8")
+        layout.set_font_description(font)
+        note = "♫" if int(self.visualizer_phase) % 2 == 0 else "♪"
+        layout.set_text(note, -1)
+        cr.set_source_rgba(0.55, 0.85, 1.0, alpha * 0.90)
+        note_bob = 2.0 * math.sin(self.visualizer_phase)
+        cr.move_to(cx + spacing + 6, cy - 8 + note_bob)
+        PangoCairo.show_layout(cr, layout)
+
+        cr.restore()
 
     def draw_mascot_eyes(self, cr, cx, cy, alpha=1.0):
         spacing = 11.0
@@ -994,11 +1244,11 @@ class NusaNotch(Gtk.Window):
             source = self.detect_source(self.active_player)
             scolor = source['color']
 
-            # 1. Left: 50x50 Album / App Glass Card
+            # 1. Left: 46x46 Album / App Glass Card
             card_x = px + 24
             card_y = 86
-            card_s = 50
-            card_r = 13
+            card_s = 46
+            card_r = 12
 
             cr.save()
             cr.new_path()
@@ -1020,7 +1270,7 @@ class NusaNotch(Gtk.Window):
             cr.restore()
 
             # 2. Middle: Text Info
-            text_x = px + 86
+            text_x = px + 80
 
             # Source badge
             font = Pango.FontDescription("Ubuntu, Sans Bold 8")
@@ -1035,11 +1285,11 @@ class NusaNotch(Gtk.Window):
                 display_title = title[:26] + ".."
             else:
                 display_title = title
-            font = Pango.FontDescription("Ubuntu, Sans Bold 12")
+            font = Pango.FontDescription("Ubuntu, Sans Bold 11.5")
             layout.set_font_description(font)
             layout.set_text(display_title, -1)
             cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
-            cr.move_to(text_x, 101)
+            cr.move_to(text_x, 99)
             PangoCairo.show_layout(cr, layout)
 
             # Artist
@@ -1047,24 +1297,29 @@ class NusaNotch(Gtk.Window):
                 display_artist = artist[:32] + ".."
             else:
                 display_artist = artist
-            font = Pango.FontDescription("Ubuntu, Sans 10")
+            font = Pango.FontDescription("Ubuntu, Sans 9.5")
             layout.set_font_description(font)
             layout.set_text(display_artist, -1)
             cr.set_source_rgba(0.68, 0.72, 0.85, alpha * 0.85)
-            cr.move_to(text_x, 120)
+            cr.move_to(text_x, 116)
             PangoCairo.show_layout(cr, layout)
 
             # 3. Right: Candle Suara (Audio Visualizer)
             viz_x = px + w - 38
-            viz_y = 110
-            self.draw_visualizer_bars(cr, viz_x, viz_y, num_bars=5, is_playing=is_playing, color=scolor, max_h=26.0, bar_w=3.5, bar_gap=3.0, alpha=alpha)
+            viz_y = 108
+            self.draw_visualizer_bars(cr, viz_x, viz_y, num_bars=5, is_playing=is_playing, color=scolor, max_h=24.0, bar_w=3.5, bar_gap=3.0, alpha=alpha)
 
-            # 4. Bottom Controls at Y=168
-            btn_y = 168
-            self.draw_circle_btn(cr, cx - 44, btn_y, 16, "⏮", alpha=alpha)
+            # 4. Toggle Floating Mini Player Button at Y=145
+            is_island_on = self.settings.get("floating_player_enabled", True)
+            island_label = "⎘ MINI PLAYER: AKTIF" if is_island_on else "⎘ MINI PLAYER: SEMBUNYI"
+            self.draw_rect_btn(cr, cx - 85, 140, 170, 22, island_label, highlight=is_island_on, font_size=8, alpha=alpha)
+
+            # 5. Bottom Controls at Y=184
+            btn_y = 184
+            self.draw_circle_btn(cr, cx - 44, btn_y, 15, "⏮", alpha=alpha)
             symbol = "⏸" if is_playing else "▶"
-            self.draw_circle_btn(cr, cx, btn_y, 20, symbol, highlight=True, alpha=alpha)
-            self.draw_circle_btn(cr, cx + 44, btn_y, 16, "⏭", alpha=alpha)
+            self.draw_circle_btn(cr, cx, btn_y, 18, symbol, highlight=True, alpha=alpha)
+            self.draw_circle_btn(cr, cx + 44, btn_y, 15, "⏭", alpha=alpha)
 
         else:
             font = Pango.FontDescription("Ubuntu, Sans 11")
