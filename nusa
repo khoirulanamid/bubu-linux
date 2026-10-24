@@ -680,7 +680,7 @@ class NusaNotch(Gtk.Window):
         self.IDLE_W = 166
         self.IDLE_H = 30
         self.EXP_W = 430
-        self.EXP_H = 224
+        self.EXP_H = 240
 
         # Start physically as the exact 166x30 pill
         self.set_default_size(self.IDLE_W, self.IDLE_H)
@@ -706,6 +706,10 @@ class NusaNotch(Gtk.Window):
         self.target_gaze_x = 0.0
         self.target_gaze_y = 0.0
         self.next_gaze_time = time.time() + 2.0
+
+        # AI Chat Scroll State
+        self.ai_scroll_y = 0.0
+        self.ai_max_scroll = 0.0
 
         # Tabs: 0: Music, 1: Agent AI, 2: Focus, 3: Shelf
         self.active_tab = 0
@@ -746,11 +750,14 @@ class NusaNotch(Gtk.Window):
         self.add_events(
             Gdk.EventMask.ENTER_NOTIFY_MASK |
             Gdk.EventMask.LEAVE_NOTIFY_MASK |
-            Gdk.EventMask.BUTTON_PRESS_MASK
+            Gdk.EventMask.BUTTON_PRESS_MASK |
+            Gdk.EventMask.SCROLL_MASK |
+            Gdk.EventMask.SMOOTH_SCROLL_MASK
         )
         self.connect("enter-notify-event", self.on_enter)
         self.connect("leave-notify-event", self.on_leave)
         self.connect("button-press-event", self.on_button_press)
+        self.connect("scroll-event", self.on_scroll)
 
         # Drag & drop setup
         self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
@@ -768,7 +775,7 @@ class NusaNotch(Gtk.Window):
         self.chat_entry.set_placeholder_text("Tanya apa saja ke AI...")
         self.chat_entry.set_size_request(self.EXP_W - 80, 28)
         self.chat_entry.connect("activate", lambda e: self.on_send_chat())
-        self.fixed.put(self.chat_entry, 22, 178)
+        self.fixed.put(self.chat_entry, 22, 196)
         self.chat_entry.hide()
 
         # Apply CSS for chat entry
@@ -917,6 +924,30 @@ class NusaNotch(Gtk.Window):
             win.set_cursor(None)
         self.queue_draw()
         return True
+
+    def on_scroll(self, widget, event):
+        self.last_interaction_time = time.time()
+        if self.mascot_state == "SLEEPY":
+            self.mascot_state = "AWAKE"
+
+        if not self.is_expanded:
+            return False
+
+        if self.active_tab == 1: # Agent AI Tab
+            smooth, dx, dy = event.get_scroll_deltas()
+            if smooth:
+                self.ai_scroll_y += dy * 22.0
+            elif event.direction == Gdk.ScrollDirection.UP:
+                self.ai_scroll_y -= 28.0
+            elif event.direction == Gdk.ScrollDirection.DOWN:
+                self.ai_scroll_y += 28.0
+
+            # Clamp scroll position
+            self.ai_scroll_y = max(0.0, min(self.ai_scroll_y, self.ai_max_scroll))
+            self.queue_draw()
+            return True
+
+        return False
 
     # ─── Drag & Drop ────────────────────────────────────────────────
     def on_drag_motion(self, widget, context, x, y, time_val):
@@ -1373,7 +1404,7 @@ class NusaNotch(Gtk.Window):
                 return True
 
             # 2c. Send Button ➤ Click
-            if px + cur_w - 54 <= x <= px + cur_w - 18 and 174 <= y <= 208:
+            if px + cur_w - 54 <= x <= px + cur_w - 18 and 190 <= y <= 228:
                 self.on_send_chat()
                 return True
 
@@ -1441,6 +1472,7 @@ class NusaNotch(Gtk.Window):
             return
 
         self.ai_loading = True
+        self.ai_scroll_y = 999999.0
         self.queue_draw()
 
         def _worker():
@@ -1459,6 +1491,7 @@ class NusaNotch(Gtk.Window):
         self.ai_loading = False
         self.ai_messages.append({"role": "assistant", "content": reply})
         save_chat(self.ai_messages)
+        self.ai_scroll_y = 999999.0
         self.queue_draw()
         if not self.is_expanded:
             preview = reply[:120] + "..." if len(reply) > 120 else reply
@@ -1994,11 +2027,11 @@ class NusaNotch(Gtk.Window):
         PangoCairo.show_layout(cr, layout)
         cr.restore()
 
-        # 2. Chat Conversation Box (Y = 96 to 170, H = 74)
+        # 2. Scrollable Chat Conversation Box (Y = 92 to 186, H = 94)
         chat_x = px + 22
-        chat_y = 96
+        chat_y = 92
         chat_w = w - 44
-        chat_h = 74
+        chat_h = 94
         chat_r = 8.0
 
         cr.save()
@@ -2013,61 +2046,125 @@ class NusaNotch(Gtk.Window):
         cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.07)
         cr.set_line_width(1.0)
         cr.stroke()
+        cr.restore()
 
-        if not self.ai_messages:
+        if not self.ai_messages and not self.ai_loading:
             layout.set_width(-1)
             layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 9.5"))
             layout.set_text("✨ Nusa AI Agent", -1)
             tw, th = layout.get_pixel_size()
             cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.95)
-            cr.move_to(cx - tw / 2.0, chat_y + 16)
+            cr.move_to(cx - tw / 2.0, chat_y + 24)
             PangoCairo.show_layout(cr, layout)
 
             layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8"))
             layout.set_text("Tanyakan apa saja di bawah, atau klik ⚙ untuk setelan API.", -1)
             tw, th = layout.get_pixel_size()
             cr.set_source_rgba(0.50, 0.53, 0.60, alpha * 0.85)
-            cr.move_to(cx - tw / 2.0, chat_y + 36)
+            cr.move_to(cx - tw / 2.0, chat_y + 46)
             PangoCairo.show_layout(cr, layout)
 
         else:
-            last_user = next((m["content"] for m in reversed(self.ai_messages) if m["role"] == "user"), "")
-            last_asst = next((m["content"] for m in reversed(self.ai_messages) if m["role"] == "assistant"), "")
+            # Measure and prepare all conversation items
+            content_w = int((chat_w - 24) * Pango.SCALE)
+            layout.set_width(content_w)
 
-            # User prompt line
-            if len(last_user) > 42:
-                last_user = last_user[:40] + "..."
-            layout.set_width(-1)
-            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8"))
-            layout.set_text(f"Anda: {last_user}", -1)
-            cr.set_source_rgba(0.70, 0.75, 0.85, alpha * 0.85)
-            cr.move_to(chat_x + 10, chat_y + 8)
-            PangoCairo.show_layout(cr, layout)
+            curr_y = 0
+            rendered_items = []
+            for m in self.ai_messages[-12:]: # display up to last 12 messages
+                role = m.get("role", "user")
+                text = m.get("content", "")
+                is_user = (role == "user")
 
-            # Assistant response (or loading pulse)
+                header_text = "Anda:" if is_user else "AI:"
+                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8.5"))
+                layout.set_text(header_text, -1)
+                _, h_th = layout.get_pixel_size()
+
+                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
+                layout.set_text(text, -1)
+                _, b_th = layout.get_pixel_size()
+
+                rendered_items.append({
+                    "is_user": is_user,
+                    "header": header_text,
+                    "text": text,
+                    "y": curr_y,
+                    "h_th": h_th,
+                    "b_th": b_th
+                })
+                curr_y += h_th + b_th + 10
+
             if self.ai_loading:
-                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
                 dots = "● " * (int(self.visualizer_phase * 1.5) % 4)
-                layout.set_text(f"AI: Sedang berpikir {dots}", -1)
-                cr.set_source_rgba(0.40, 0.75, 1.0, alpha * 0.90)
-                cr.move_to(chat_x + 10, chat_y + 26)
-                PangoCairo.show_layout(cr, layout)
-            else:
-                layout.set_width(int((chat_w - 20) * Pango.SCALE))
+                loading_text = f"Sedang berpikir {dots}"
                 layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
-                clean_reply = last_asst.strip()
-                if len(clean_reply) > 160:
-                    clean_reply = clean_reply[:157] + "..."
-                layout.set_text(f"AI: {clean_reply}", -1)
-                cr.set_source_rgba(0.95, 0.96, 0.98, alpha * 0.95)
-                cr.move_to(chat_x + 10, chat_y + 24)
+                layout.set_text(loading_text, -1)
+                _, l_th = layout.get_pixel_size()
+                rendered_items.append({
+                    "is_loading": True,
+                    "header": "AI:",
+                    "text": loading_text,
+                    "y": curr_y,
+                    "h_th": 12,
+                    "b_th": l_th
+                })
+                curr_y += 12 + l_th + 10
+
+            total_content_h = curr_y
+            self.ai_max_scroll = max(0.0, total_content_h - (chat_h - 16))
+            self.ai_scroll_y = max(0.0, min(self.ai_scroll_y, self.ai_max_scroll))
+
+            # Clip inside container & translate
+            cr.save()
+            cr.rectangle(chat_x + 3, chat_y + 3, chat_w - 6, chat_h - 6)
+            cr.clip()
+            cr.translate(0, -self.ai_scroll_y)
+
+            for item in rendered_items:
+                iy = chat_y + 8 + item["y"]
+
+                # Header
+                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8.5"))
+                layout.set_text(item["header"], -1)
+                if item.get("is_user"):
+                    cr.set_source_rgba(0.70, 0.75, 0.85, alpha * 0.90)
+                else:
+                    cr.set_source_rgba(0.40, 0.75, 1.0, alpha * 0.95)
+                cr.move_to(chat_x + 10, iy)
                 PangoCairo.show_layout(cr, layout)
 
-        cr.restore()
+                # Body text
+                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
+                layout.set_text(item["text"], -1)
+                if item.get("is_loading"):
+                    cr.set_source_rgba(0.40, 0.75, 1.0, alpha * 0.85)
+                else:
+                    cr.set_source_rgba(0.95, 0.96, 0.98, alpha * 0.95)
+                cr.move_to(chat_x + 10, iy + item["h_th"] + 2)
+                PangoCairo.show_layout(cr, layout)
 
-        # 3. Send Button at px + w - 50, Y = 178 (28x28)
+            cr.restore()
+
+            # Hardware Scrollbar Indicator if content overflows
+            if self.ai_max_scroll > 0:
+                cr.save()
+                sb_w = 2.5
+                sb_x = chat_x + chat_w - 6.0
+                thumb_h = max(16.0, (chat_h / total_content_h) * chat_h)
+                thumb_y = chat_y + 4 + (self.ai_scroll_y / self.ai_max_scroll) * (chat_h - thumb_h - 8)
+                cr.new_sub_path()
+                r = sb_w / 2.0
+                cr.arc(sb_x + r, thumb_y + r, r, math.pi, 0)
+                cr.arc(sb_x + r, thumb_y + thumb_h - r, r, 0, math.pi)
+                cr.close_path()
+                cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.28)
+                cr.fill()
+                cr.restore()
+
+        # 3. Send Button at px + w - 50, Y = 196 (28x28)
         cr.save()
-        sb_x, sb_y, sb_s = px + w - 50, 178, 28
+        sb_x, sb_y, sb_s = px + w - 50, 196, 28
         cr.rectangle(sb_x, sb_y, sb_s, sb_s)
         cr.set_source_rgba(0.96, 0.97, 0.99, alpha * 0.96)
         cr.fill()
