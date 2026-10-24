@@ -3,16 +3,23 @@
 Nusa for Linux — A living, interactive notch for Linux desktop.
 Inspired by Nusa (https://rama2555.github.io/nusa/).
 
-Engine v3.4 (Hardware Native / Clean Precision Design):
-- Seamless Laptop Hardware Integration:
-  * Solid deep matte obsidian surface (#0d0d0f) that naturally blends with the laptop's webcam bezel.
-  * Zero gradients or artificial neon glows.
-  * Precision 1px hairline hardware seam border.
+Engine v3.5:
+- Universal AI Agent Tab:
+  * Chat with AI directly from the desktop Notch.
+  * Supports Anthropic (Claude direct & via OpenRouter), OpenAI, DeepSeek, local Ollama, Groq, etc.
+  * Dedicated Settings Dialog (⚙) with Provider Presets, Base URL, API Key, Model, and Connection Test.
+  * Chat history persistence with clear thread option.
+- Hardware Native / Clean Precision Design:
+  * Solid deep matte obsidian surface (#0d0d0f) matching laptop webcam bezel.
+  * Zero gradients or neon glows.
   * Apple / macOS segmented control tab bar.
-  * Solid hardware playback controls: high-contrast off-white play button with dark vector icon.
-  * Professional linear scrubber and timeline without AI blur.
-- Manual Interaction: Click-to-open and click-to-close (header / close button).
-- Detachable Floating Music Island: Draggable anywhere with matching clean design.
+  * High-contrast solid hardware playback controls & interactive timeline scrubber.
+- Centered Living Companion Mascot:
+  * Alert and awake for 1 minute after any interaction.
+  * Falls asleep peacefully with floating 'z' if inactive for > 1 minute.
+  * Awakens immediately upon hover or click.
+- Manual Interaction: Click-to-open and click-to-close.
+- Detachable Floating Music Island: Draggable anywhere on screen.
 - Physical micro-window geometry: 166x30 when idle, strictly bounded to visible pill.
 """
 
@@ -30,25 +37,30 @@ import time
 import os
 import sys
 import json
+import urllib.request
 import urllib.parse
+import ssl
+import threading
 import subprocess
 import fcntl
 
 CONFIG_DIR = os.path.expanduser("~/.config/nusa")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 SHELF_FILE = os.path.join(CONFIG_DIR, "shelf.json")
+CHAT_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
 
 DEFAULT_SETTINGS = {
     "mascot_enabled": True,
     "pomodoro_duration": 25 * 60,
-    "water_goal": 2000,
-    "water_current": 500,
-    "water_date": time.strftime("%Y-%m-%d"),
     "start_with_system": True,
     "floating_player_enabled": True,
-    "floating_player_pos": None
+    "floating_player_pos": None,
+    "ai_base_url": "https://openrouter.ai/api/v1",
+    "ai_api_key": "",
+    "ai_model": "anthropic/claude-3.5-sonnet",
+    "ai_system_prompt": "Kamu adalah asisten AI Nusa yang cerdas, ringkas, dan ramah di desktop Linux. Berikan jawaban yang padat, akurat, dan langsung ke inti."
 }
 
 def load_settings():
@@ -58,10 +70,6 @@ def load_settings():
                 data = json.load(f)
                 s = dict(DEFAULT_SETTINGS)
                 s.update(data)
-                today = time.strftime("%Y-%m-%d")
-                if s.get("water_date") != today:
-                    s["water_date"] = today
-                    s["water_current"] = 0
                 return s
         except Exception:
             pass
@@ -90,6 +98,22 @@ def save_shelf(shelf_items):
     except Exception as e:
         print("[Nusa] Error saving shelf:", e)
 
+def load_chat():
+    if os.path.exists(CHAT_FILE):
+        try:
+            with open(CHAT_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_chat(messages):
+    try:
+        with open(CHAT_FILE, 'w') as f:
+            json.dump(messages[-20:], f, indent=2)
+    except Exception as e:
+        print("[Nusa] Error saving chat:", e)
+
 def format_duration(seconds):
     if seconds <= 0:
         return "00:00"
@@ -100,6 +124,189 @@ def format_duration(seconds):
         m = m % 60
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+# ─── Universal AI Agent Client ──────────────────────────────────────
+def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
+    base_url = (base_url or "https://openrouter.ai/api/v1").rstrip("/")
+    is_anthropic_direct = "anthropic.com" in base_url
+    ctx = ssl.create_default_context()
+
+    if is_anthropic_direct:
+        url = f"{base_url}/messages" if not base_url.endswith("/messages") else base_url
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json"
+        }
+        system_msg = ""
+        clean_msgs = []
+        for m in messages:
+            if m.get("role") == "system":
+                system_msg = m.get("content", "")
+            else:
+                clean_msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+
+        payload = {
+            "model": model or "claude-3-5-sonnet-20241022",
+            "max_tokens": max_tokens,
+            "messages": clean_msgs
+        }
+        if system_msg:
+            payload["system"] = system_msg
+
+    else: # OpenAI / OpenRouter / DeepSeek / Ollama / Groq compatible
+        url = f"{base_url}/chat/completions" if not base_url.endswith("/chat/completions") else base_url
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model or "gpt-4o-mini",
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.7
+        }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=40, context=ctx) as resp:
+        res_data = json.loads(resp.read().decode("utf-8"))
+
+    if is_anthropic_direct:
+        return res_data["content"][0]["text"]
+    else:
+        return res_data["choices"][0]["message"]["content"]
+
+# ─── AI Settings Dialog Window ──────────────────────────────────────
+class AISettingsDialog(Gtk.Window):
+    def __init__(self, current_settings, on_save_cb):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("Pengaturan AI Agent — Nusa")
+        self.set_default_size(440, 390)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_resizable(False)
+        self.on_save_cb = on_save_cb
+        self.settings = dict(current_settings)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.set_margin_start(20)
+        vbox.set_margin_end(20)
+        vbox.set_margin_top(18)
+        vbox.set_margin_bottom(18)
+        self.add(vbox)
+
+        # Header Title
+        title = Gtk.Label()
+        title.set_markup("<b><span size='large'>⚙ Pengaturan AI Agent</span></b>")
+        title.set_xalign(0)
+        vbox.pack_start(title, False, False, 0)
+
+        desc = Gtk.Label(label="Mendukung semua penyedia: Anthropic (Claude), OpenAI, OpenRouter, DeepSeek, Ollama lokal, dll.")
+        desc.set_xalign(0)
+        desc.set_line_wrap(True)
+        vbox.pack_start(desc, False, False, 0)
+
+        # Presets Label & Button row
+        preset_lbl = Gtk.Label(label="Preset Cepat:")
+        preset_lbl.set_xalign(0)
+        vbox.pack_start(preset_lbl, False, False, 0)
+
+        preset_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        presets = [
+            ("OpenRouter", "https://openrouter.ai/api/v1", "anthropic/claude-3.5-sonnet"),
+            ("Anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022"),
+            ("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
+            ("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+            ("Ollama", "http://localhost:11434/v1", "llama3")
+        ]
+
+        for name, url, model in presets:
+            btn = Gtk.Button(label=name)
+            btn.connect("clicked", lambda b, u=url, m=model: self.apply_preset(u, m))
+            preset_box.pack_start(btn, True, True, 0)
+        vbox.pack_start(preset_box, False, False, 0)
+
+        # Base URL field
+        url_lbl = Gtk.Label(label="Base URL:")
+        url_lbl.set_xalign(0)
+        vbox.pack_start(url_lbl, False, False, 0)
+        self.url_entry = Gtk.Entry()
+        self.url_entry.set_text(self.settings.get("ai_base_url", "https://openrouter.ai/api/v1"))
+        vbox.pack_start(self.url_entry, False, False, 0)
+
+        # API Key field
+        key_lbl = Gtk.Label(label="API Key:")
+        key_lbl.set_xalign(0)
+        vbox.pack_start(key_lbl, False, False, 0)
+        self.key_entry = Gtk.Entry()
+        self.key_entry.set_visibility(False)
+        self.key_entry.set_text(self.settings.get("ai_api_key", ""))
+        vbox.pack_start(self.key_entry, False, False, 0)
+
+        # Model field
+        model_lbl = Gtk.Label(label="Model:")
+        model_lbl.set_xalign(0)
+        vbox.pack_start(model_lbl, False, False, 0)
+        self.model_entry = Gtk.Entry()
+        self.model_entry.set_text(self.settings.get("ai_model", "anthropic/claude-3.5-sonnet"))
+        vbox.pack_start(self.model_entry, False, False, 0)
+
+        # Status feedback label
+        self.status_lbl = Gtk.Label(label="")
+        self.status_lbl.set_xalign(0)
+        vbox.pack_start(self.status_lbl, False, False, 0)
+
+        # Bottom Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        test_btn = Gtk.Button(label="🔍 Uji Koneksi")
+        test_btn.connect("clicked", self.on_test_clicked)
+        btn_box.pack_start(test_btn, False, False, 0)
+
+        save_btn = Gtk.Button(label="✓ Simpan")
+        save_btn.connect("clicked", self.on_save_clicked)
+        btn_box.pack_end(save_btn, False, False, 0)
+
+        cancel_btn = Gtk.Button(label="Batal")
+        cancel_btn.connect("clicked", lambda b: self.destroy())
+        btn_box.pack_end(cancel_btn, False, False, 0)
+
+        vbox.pack_end(btn_box, False, False, 0)
+
+    def apply_preset(self, url, model):
+        self.url_entry.set_text(url)
+        self.model_entry.set_text(model)
+        self.status_lbl.set_markup(f"<span color='#93c5fd'>Preset: {model}</span>")
+
+    def on_test_clicked(self, btn):
+        self.status_lbl.set_markup("<span color='#fbbf24'>⏳ Menguji koneksi...</span>")
+        base_url = self.url_entry.get_text().strip()
+        api_key = self.key_entry.get_text().strip()
+        model = self.model_entry.get_text().strip()
+
+        def _test_worker():
+            try:
+                call_ai_api(base_url, api_key, model, [{"role": "user", "content": "hi"}], max_tokens=5)
+                GLib.idle_add(self.status_lbl.set_markup, "<span color='#4ade80'>✓ Berhasil terhubung ke model AI!</span>")
+            except Exception as e:
+                err_msg = str(e)
+                if len(err_msg) > 65:
+                    err_msg = err_msg[:62] + "..."
+                GLib.idle_add(self.status_lbl.set_markup, f"<span color='#f87171'>✗ Gagal: {GLib.markup_escape_text(err_msg)}</span>")
+
+        threading.Thread(target=_test_worker, daemon=True).start()
+
+    def on_save_clicked(self, btn):
+        self.settings["ai_base_url"] = self.url_entry.get_text().strip()
+        self.settings["ai_api_key"] = self.key_entry.get_text().strip()
+        self.settings["ai_model"] = self.model_entry.get_text().strip()
+        if self.on_save_cb:
+            self.on_save_cb(self.settings)
+        self.destroy()
 
 # ─── High Performance Fluid Spring ──────────────────────────────────
 class FluidSpring:
@@ -445,15 +652,19 @@ class NusaNotch(Gtk.Window):
         self.next_blink_time = time.time() + 3.0
         self.sleepy_z = 0.0
 
-        # Tabs: 0: Music, 1: Focus, 2: Shelf, 3: Water
+        # Tabs: 0: Music, 1: Agent AI, 2: Focus, 3: Shelf
         self.active_tab = 0
-        self.tabs = ["Music", "Focus", "Shelf", "Water"]
+        self.tabs = ["Music", "Agent AI", "Focus", "Shelf"]
 
         # Controllers & Data
         self.settings = load_settings()
         self.shelf_items = load_shelf()
         self.mpris = MprisController()
         self.active_player = None
+
+        # AI Agent Chat Data & State
+        self.ai_messages = load_chat()
+        self.ai_loading = False
 
         # Pomodoro
         self.pomo_running = False
@@ -493,6 +704,37 @@ class NusaNotch(Gtk.Window):
         self.connect("drag-leave", self.on_drag_leave)
         self.connect("drag-data-received", self.on_drag_drop)
 
+        # Overlaid GTK Entry for AI Chat
+        self.fixed = Gtk.Fixed()
+        self.add(self.fixed)
+
+        self.chat_entry = Gtk.Entry()
+        self.chat_entry.set_no_show_all(True)
+        self.chat_entry.set_placeholder_text("Tanya apa saja ke AI...")
+        self.chat_entry.set_size_request(self.EXP_W - 80, 28)
+        self.chat_entry.connect("activate", lambda e: self.on_send_chat())
+        self.fixed.put(self.chat_entry, 22, 178)
+        self.chat_entry.hide()
+
+        # Apply CSS for chat entry
+        css_provider = Gtk.CssProvider()
+        css_data = """
+        entry {
+            background-color: rgba(255, 255, 255, 0.06);
+            color: #f2f4f8;
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 11px;
+        }
+        entry:focus {
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            background-color: rgba(255, 255, 255, 0.09);
+        }
+        """
+        css_provider.load_from_data(css_data.encode())
+        Gtk.StyleContext.add_provider_for_screen(screen, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
         # Floating Mini Player Island
         self.floating_player = FloatingMusicIsland(self)
         if self.settings.get("floating_player_enabled", True):
@@ -502,8 +744,10 @@ class NusaNotch(Gtk.Window):
         GLib.timeout_add(1000, self.on_second_tick)
         GLib.timeout_add(30, self.on_fast_tick)
 
-        self.reposition(self.IDLE_W)
         self.show_all()
+        self.chat_entry.hide()
+        self.resize(self.IDLE_W, self.IDLE_H)
+        self.reposition(self.IDLE_W)
 
     def get_monitor_geometry(self):
         display = Gdk.Display.get_default()
@@ -517,6 +761,13 @@ class NusaNotch(Gtk.Window):
         x = geom.x + (geom.width - current_width) // 2
         y = geom.y
         self.move(x, y)
+
+    def update_widget_visibility(self):
+        if self.is_expanded and self.active_tab == 1:
+            self.chat_entry.show()
+            self.chat_entry.grab_focus()
+        else:
+            self.chat_entry.hide()
 
     # ─── VSync Frame Animation Engine ───────────────────────────────
     def ensure_animation(self):
@@ -558,6 +809,7 @@ class NusaNotch(Gtk.Window):
         # Trigger spring expansion
         self.spring.set_target(1.0)
         self.ensure_animation()
+        self.update_widget_visibility()
 
     def retract(self):
         self.cancel_retract()
@@ -574,6 +826,7 @@ class NusaNotch(Gtk.Window):
         # Trigger spring retraction
         self.spring.set_target(0.0)
         self.ensure_animation()
+        self.update_widget_visibility()
 
     def cancel_retract(self):
         if self.retract_timer:
@@ -615,7 +868,7 @@ class NusaNotch(Gtk.Window):
         self.cancel_retract()
         if not self.is_expanded:
             self.drag_hover = True
-            self.active_tab = 2 # File Shelf
+            self.active_tab = 3 # File Shelf
             self.expand()
         Gdk.drag_status(context, Gdk.DragAction.COPY, time_val)
         return True
@@ -648,7 +901,8 @@ class NusaNotch(Gtk.Window):
                                 "is_dir": os.path.isdir(p)
                             })
             save_shelf(self.shelf_items)
-            self.active_tab = 2
+            self.active_tab = 3
+            self.update_widget_visibility()
             self.queue_draw()
             subprocess.Popen(
                 ["notify-send", "-a", "Nusa", "Nusa File Shelf", f"Menyimpan {len(uris)} file ke shelf."],
@@ -699,9 +953,9 @@ class NusaNotch(Gtk.Window):
     def on_fast_tick(self):
         now = time.time()
 
-        # Animate Audio Visualizer Candle when playing
+        # Animate Audio Visualizer Candle when playing or AI is thinking
         is_playing = (self.active_player and self.active_player.get('status') == 'Playing')
-        if is_playing:
+        if is_playing or self.ai_loading:
             self.visualizer_phase = (self.visualizer_phase + 0.18) % (math.pi * 20.0)
             self.queue_draw()
             if self.floating_player and self.floating_player.get_visible():
@@ -964,7 +1218,7 @@ class NusaNotch(Gtk.Window):
             self.retract()
             return True
 
-        # 1. Tab Navigation
+        # 1. Tab Navigation (Y = 36 to 64)
         if 36 <= y <= 64:
             bar_x = px + 20
             bar_w = cur_w - 40
@@ -973,6 +1227,7 @@ class NusaNotch(Gtk.Window):
                 tx = bar_x + i * tab_w
                 if tx <= x <= tx + tab_w:
                     self.active_tab = i
+                    self.update_widget_visibility()
                     self.queue_draw()
                     return True
 
@@ -1020,7 +1275,25 @@ class NusaNotch(Gtk.Window):
                     self.mpris.next(self.active_player)
                     return True
 
-        elif self.active_tab == 1: # Focus
+        elif self.active_tab == 1: # Agent AI
+            # 2a. Settings Gear ⚙ Click
+            if px + cur_w - 46 <= x <= px + cur_w - 20 and 70 <= y <= 94:
+                self.open_ai_settings_dialog()
+                return True
+
+            # 2b. Reset / Clear Chat 🗑 Click
+            if px + cur_w - 74 <= x <= px + cur_w - 48 and 70 <= y <= 94:
+                self.ai_messages = []
+                save_chat(self.ai_messages)
+                self.queue_draw()
+                return True
+
+            # 2c. Send Button ➤ Click
+            if px + cur_w - 54 <= x <= px + cur_w - 18 and 174 <= y <= 208:
+                self.on_send_chat()
+                return True
+
+        elif self.active_tab == 2: # Focus
             btn_y = 166
             cx = self.EXP_W / 2.0
             if btn_y - 18 <= y <= btn_y + 18:
@@ -1034,41 +1307,80 @@ class NusaNotch(Gtk.Window):
                     self.queue_draw()
                     return True
 
-        elif self.active_tab == 2: # Shelf
-            if px + cur_w - 90 <= x <= px + cur_w - 20 and 85 <= y <= 110:
+        elif self.active_tab == 3: # Shelf
+            if px + cur_w - 90 <= x <= px + cur_w - 20 and 80 <= y <= 106:
                 self.shelf_items = []
                 save_shelf(self.shelf_items)
                 self.queue_draw()
                 return True
 
-            item_y = 120
+            item_y = 112
             for item in self.shelf_items[-3:]:
                 if px + 20 <= x <= px + cur_w - 20 and item_y <= y <= item_y + 28:
                     subprocess.Popen(["xdg-open", item["path"]])
                     return True
-                item_y += 32
-
-        elif self.active_tab == 3: # Water
-            btn_y = 166
-            cx = self.EXP_W / 2.0
-            if btn_y - 18 <= y <= btn_y + 18:
-                if cx - 105 <= x <= cx - 35:
-                    self.settings["water_current"] += 250
-                    save_settings(self.settings)
-                    self.queue_draw()
-                    return True
-                elif cx - 30 <= x <= cx + 40:
-                    self.settings["water_current"] += 500
-                    save_settings(self.settings)
-                    self.queue_draw()
-                    return True
-                elif cx + 45 <= x <= cx + 105:
-                    self.settings["water_current"] = 0
-                    save_settings(self.settings)
-                    self.queue_draw()
-                    return True
+                item_y += 30
 
         return True
+
+    def open_ai_settings_dialog(self):
+        def _on_save(new_settings):
+            self.settings.update(new_settings)
+            save_settings(self.settings)
+            self.queue_draw()
+
+        dialog = AISettingsDialog(self.settings, _on_save)
+        dialog.show_all()
+
+    def on_send_chat(self):
+        text = self.chat_entry.get_text().strip()
+        if not text:
+            return
+        if self.ai_loading:
+            return
+
+        self.chat_entry.set_text("")
+        self.ai_messages.append({"role": "user", "content": text})
+        save_chat(self.ai_messages)
+
+        api_key = self.settings.get("ai_api_key", "").strip()
+        base_url = self.settings.get("ai_base_url", "https://openrouter.ai/api/v1").strip()
+        model = self.settings.get("ai_model", "anthropic/claude-3.5-sonnet").strip()
+
+        if not api_key and not ("localhost" in base_url or "127.0.0.1" in base_url):
+            self.ai_messages.append({
+                "role": "assistant",
+                "content": "⚠️ API Key belum disetel. Klik tombol ⚙ di kanan atas untuk mengatur Base URL & API Key."
+            })
+            save_chat(self.ai_messages)
+            self.queue_draw()
+            return
+
+        self.ai_loading = True
+        self.queue_draw()
+
+        def _worker():
+            try:
+                system_prompt = self.settings.get("ai_system_prompt", "Kamu adalah asisten AI Nusa yang cerdas, ringkas, dan ramah di desktop Linux.")
+                msgs_to_send = [{"role": "system", "content": system_prompt}] + self.ai_messages[-6:]
+                reply = call_ai_api(base_url, api_key, model, msgs_to_send)
+                GLib.idle_add(self._on_ai_reply, reply)
+            except Exception as e:
+                err_text = str(e)
+                GLib.idle_add(self._on_ai_reply, f"⚠️ Gagal: {err_text}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ai_reply(self, reply):
+        self.ai_loading = False
+        self.ai_messages.append({"role": "assistant", "content": reply})
+        save_chat(self.ai_messages)
+        self.queue_draw()
+        if not self.is_expanded:
+            preview = reply[:120] + "..." if len(reply) > 120 else reply
+            subprocess.Popen([
+                "notify-send", "-a", "Nusa AI", "Nusa AI Agent", preview
+            ], env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority")))
 
     # ─── Cairo Render Pipeline ──────────────────────────────────────
     def on_draw(self, widget, cr):
@@ -1146,20 +1458,10 @@ class NusaNotch(Gtk.Window):
         if is_music_playing:
             source = self.detect_source(self.active_player)
 
-            # Digital Clock on Left
-            font = Pango.FontDescription("Ubuntu, Sans Bold 9")
-            layout.set_font_description(font)
-            current_time = time.strftime("%H:%M")
-            layout.set_text(current_time, -1)
-            lw, lh = layout.get_pixel_size()
-            cr.set_source_rgba(0.70, 0.73, 0.80, alpha * 0.90)
-            cr.move_to(cx - 62, cy - lh / 2.0)
-            PangoCairo.show_layout(cr, layout)
-
             # Cute Singing Mascot in Center!
             self.draw_singing_mascot(cr, cx, cy, alpha)
 
-            # Mini 3-bar animated candle visualizer on Right
+            # Mini 3-bar animated visualizer on Right
             self.draw_visualizer_bars(cr, cx + 56, cy, num_bars=3, is_playing=True, color=[1.0, 1.0, 1.0], max_h=10.0, bar_w=2.0, bar_gap=2.0, alpha=alpha * 0.75)
             return
 
@@ -1167,14 +1469,13 @@ class NusaNotch(Gtk.Window):
         if self.pomo_running:
             mins = self.pomo_time_left // 60
             secs = self.pomo_time_left % 60
-            font = Pango.FontDescription("Ubuntu, Monospace Bold 9.5")
+            font = Pango.FontDescription("Ubuntu, Monospace Bold 8")
             layout.set_font_description(font)
-            layout.set_text(f"⏱ {mins:02d}:{secs:02d}", -1)
+            layout.set_text(f"{mins:02d}:{secs:02d}", -1)
             lw, lh = layout.get_pixel_size()
-            cr.set_source_rgba(0.95, 0.40, 0.40, alpha * 0.95)
-            cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
+            cr.set_source_rgba(0.95, 0.40, 0.40, alpha * 0.90)
+            cr.move_to(cx - 62, cy - lh / 2.0)
             PangoCairo.show_layout(cr, layout)
-            return
 
         # 3. Mascot ALWAYS in Center of Idle Pill!
         if self.is_hovered and not self.is_expanded:
@@ -1351,11 +1652,11 @@ class NusaNotch(Gtk.Window):
         if self.active_tab == 0:
             self.draw_music_tab(cr, px, w, h, alpha)
         elif self.active_tab == 1:
-            self.draw_focus_tab(cr, px, w, h, alpha)
+            self.draw_ai_tab(cr, px, w, h, alpha)
         elif self.active_tab == 2:
-            self.draw_shelf_tab(cr, px, w, h, alpha)
+            self.draw_focus_tab(cr, px, w, h, alpha)
         elif self.active_tab == 3:
-            self.draw_water_tab(cr, px, w, h, alpha)
+            self.draw_shelf_tab(cr, px, w, h, alpha)
 
     def draw_music_tab(self, cr, px, w, h, alpha):
         cx = self.EXP_W / 2.0
@@ -1542,6 +1843,148 @@ class NusaNotch(Gtk.Window):
             cr.move_to(cx - tw / 2.0, 122)
             PangoCairo.show_layout(cr, layout)
 
+    # ─── AI Agent Tab UI ────────────────────────────────────────────
+    def draw_ai_tab(self, cr, px, w, h, alpha):
+        cx = self.EXP_W / 2.0
+        cr.new_path()
+        layout = PangoCairo.create_layout(cr)
+
+        model = self.settings.get("ai_model", "claude-3.5-sonnet")
+        if "/" in model:
+            model = model.split("/")[-1]
+        if len(model) > 22:
+            model = model[:20] + ".."
+
+        # 1. Header Row (Y = 74)
+        # Left: Model badge
+        font = Pango.FontDescription("Ubuntu, Sans Bold 8.5")
+        layout.set_font_description(font)
+        layout.set_text(f"● {model}", -1)
+        cr.set_source_rgba(0.45, 0.75, 1.0, alpha * 0.95)
+        cr.move_to(px + 24, 76)
+        PangoCairo.show_layout(cr, layout)
+
+        # Clear icon 🗑 at px + w - 58, 74
+        cr.save()
+        cr.arc(px + w - 58, 81, 9, 0, 2 * math.pi)
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.05)
+        cr.fill_preserve()
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.08)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8"))
+        layout.set_text("🗑", -1)
+        tw, th = layout.get_pixel_size()
+        cr.set_source_rgba(0.65, 0.68, 0.75, alpha * 0.85)
+        cr.move_to(px + w - 58 - tw / 2.0, 81 - th / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+        # Settings Gear icon ⚙ at px + w - 34, 74
+        cr.save()
+        cr.arc(px + w - 34, 81, 9, 0, 2 * math.pi)
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.05)
+        cr.fill_preserve()
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.08)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
+        layout.set_text("⚙", -1)
+        tw, th = layout.get_pixel_size()
+        cr.set_source_rgba(0.85, 0.88, 0.95, alpha * 0.90)
+        cr.move_to(px + w - 34 - tw / 2.0, 81 - th / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+        # 2. Chat Conversation Box (Y = 96 to 170, H = 74)
+        chat_x = px + 22
+        chat_y = 96
+        chat_w = w - 44
+        chat_h = 74
+        chat_r = 8.0
+
+        cr.save()
+        cr.new_sub_path()
+        cr.arc(chat_x + chat_w - chat_r, chat_y + chat_r, chat_r, -math.pi/2, 0)
+        cr.arc(chat_x + chat_w - chat_r, chat_y + chat_h - chat_r, chat_r, 0, math.pi/2)
+        cr.arc(chat_x + chat_r, chat_y + chat_h - chat_r, chat_r, math.pi/2, math.pi)
+        cr.arc(chat_x + chat_r, chat_y + chat_r, chat_r, math.pi, 3*math.pi/2)
+        cr.close_path()
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.04)
+        cr.fill_preserve()
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.07)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        if not self.ai_messages:
+            layout.set_width(-1)
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 9.5"))
+            layout.set_text("✨ Nusa AI Agent", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.95)
+            cr.move_to(cx - tw / 2.0, chat_y + 16)
+            PangoCairo.show_layout(cr, layout)
+
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8"))
+            layout.set_text("Tanyakan apa saja di bawah, atau klik ⚙ untuk setelan API.", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.50, 0.53, 0.60, alpha * 0.85)
+            cr.move_to(cx - tw / 2.0, chat_y + 36)
+            PangoCairo.show_layout(cr, layout)
+
+        else:
+            last_user = next((m["content"] for m in reversed(self.ai_messages) if m["role"] == "user"), "")
+            last_asst = next((m["content"] for m in reversed(self.ai_messages) if m["role"] == "assistant"), "")
+
+            # User prompt line
+            if len(last_user) > 42:
+                last_user = last_user[:40] + "..."
+            layout.set_width(-1)
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8"))
+            layout.set_text(f"Anda: {last_user}", -1)
+            cr.set_source_rgba(0.70, 0.75, 0.85, alpha * 0.85)
+            cr.move_to(chat_x + 10, chat_y + 8)
+            PangoCairo.show_layout(cr, layout)
+
+            # Assistant response (or loading pulse)
+            if self.ai_loading:
+                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
+                dots = "● " * (int(self.visualizer_phase * 1.5) % 4)
+                layout.set_text(f"AI: Sedang berpikir {dots}", -1)
+                cr.set_source_rgba(0.40, 0.75, 1.0, alpha * 0.90)
+                cr.move_to(chat_x + 10, chat_y + 26)
+                PangoCairo.show_layout(cr, layout)
+            else:
+                layout.set_width(int((chat_w - 20) * Pango.SCALE))
+                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
+                clean_reply = last_asst.strip()
+                if len(clean_reply) > 160:
+                    clean_reply = clean_reply[:157] + "..."
+                layout.set_text(f"AI: {clean_reply}", -1)
+                cr.set_source_rgba(0.95, 0.96, 0.98, alpha * 0.95)
+                cr.move_to(chat_x + 10, chat_y + 24)
+                PangoCairo.show_layout(cr, layout)
+
+        cr.restore()
+
+        # 3. Send Button at px + w - 50, Y = 178 (28x28)
+        cr.save()
+        sb_x, sb_y, sb_s = px + w - 50, 178, 28
+        cr.rectangle(sb_x, sb_y, sb_s, sb_s)
+        cr.set_source_rgba(0.96, 0.97, 0.99, alpha * 0.96)
+        cr.fill()
+
+        layout.set_width(-1)
+        layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 10"))
+        layout.set_text("➤", -1)
+        tw, th = layout.get_pixel_size()
+        cr.set_source_rgba(0.08, 0.09, 0.11, alpha * 0.96)
+        cr.move_to(sb_x + (sb_s - tw) / 2.0, sb_y + (sb_s - th) / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
     def draw_focus_tab(self, cr, px, w, h, alpha):
         cx = self.EXP_W / 2.0
         cr.new_path()
@@ -1617,47 +2060,6 @@ class NusaNotch(Gtk.Window):
                 cr.restore()
                 item_y += 30
 
-    def draw_water_tab(self, cr, px, w, h, alpha):
-        cx = self.EXP_W / 2.0
-        cr.new_path()
-        layout = PangoCairo.create_layout(cr)
-
-        cur = self.settings.get("water_current", 500)
-        goal = self.settings.get("water_goal", 2000)
-        pct = min(100, int((cur / goal) * 100))
-
-        font = Pango.FontDescription("Ubuntu, Sans Bold 20")
-        layout.set_font_description(font)
-        layout.set_text(f"{cur / 1000.0:.1f} / {goal / 1000.0:.1f} L  ({pct}%)", -1)
-        tw, th = layout.get_pixel_size()
-
-        cr.set_source_rgba(0.40, 0.75, 0.95, alpha)
-        cr.move_to(cx - tw / 2.0, 92)
-        PangoCairo.show_layout(cr, layout)
-
-        bar_w = w - 80
-        bar_x = px + 40
-        bar_y = 128
-        bar_h = 6
-
-        cr.save()
-        cr.new_path()
-        cr.rectangle(bar_x, bar_y, bar_w, bar_h)
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.10)
-        cr.fill()
-
-        fill_w = bar_w * (pct / 100.0)
-        if fill_w > 0:
-            cr.rectangle(bar_x, bar_y, fill_w, bar_h)
-            cr.set_source_rgba(0.40, 0.75, 0.95, alpha * 0.90)
-            cr.fill()
-        cr.restore()
-
-        btn_y = 166
-        self.draw_rect_btn(cr, cx - 105, btn_y - 14, 66, 28, "+250 ml", alpha=alpha)
-        self.draw_rect_btn(cr, cx - 33, btn_y - 14, 66, 28, "+500 ml", alpha=alpha)
-        self.draw_rect_btn(cr, cx + 40, btn_y - 14, 65, 28, "RESET", alpha=alpha)
-
     # ─── Professional UI Buttons (Solid, Clean) ─────────────────────
     def draw_rect_btn(self, cr, bx, by, bw, bh, text, highlight=False, font_size=9, alpha=1.0):
         cr.save()
@@ -1687,7 +2089,7 @@ class NusaNotch(Gtk.Window):
         tw, th = layout.get_pixel_size()
 
         if highlight:
-            cr.set_source_rgba(0.08, 0.09, 0.11, alpha * 0.96) # Dark text on white button
+            cr.set_source_rgba(0.08, 0.09, 0.11, alpha * 0.96)
         else:
             cr.set_source_rgba(0.90, 0.92, 0.96, alpha * 0.90)
         cr.move_to(bx + (bw - tw) / 2.0, by + (bh - th) / 2.0)
