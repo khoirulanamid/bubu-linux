@@ -242,6 +242,7 @@ class NusaNotch(Gtk.Window):
         # State flags
         self.drag_hover = False
         self.retract_timer = None
+        self.watchdog_id = 0
 
         # RGBA visual
         screen = self.get_screen()
@@ -329,6 +330,10 @@ class NusaNotch(Gtk.Window):
         self.spring.set_target(1.0)
         self.ensure_animation()
 
+        # 3. Start pointer watchdog to guarantee auto-close even if X11 drops leave event
+        if self.watchdog_id == 0:
+            self.watchdog_id = GLib.timeout_add(150, self.check_pointer_watchdog)
+
     def retract(self):
         self.cancel_retract()
         if not self.is_expanded:
@@ -336,6 +341,10 @@ class NusaNotch(Gtk.Window):
         self.is_expanded = False
         self.drag_hover = False
         self.mascot_state = "AWAKE"
+
+        if self.watchdog_id != 0:
+            GLib.source_remove(self.watchdog_id)
+            self.watchdog_id = 0
 
         # Trigger spring retraction
         self.spring.set_target(0.0)
@@ -346,26 +355,50 @@ class NusaNotch(Gtk.Window):
             GLib.source_remove(self.retract_timer)
             self.retract_timer = None
 
+    def check_pointer_watchdog(self):
+        if not self.is_expanded:
+            self.watchdog_id = 0
+            return False
+
+        display = Gdk.Display.get_default()
+        if not display:
+            return True
+        seat = display.get_default_seat()
+        if not seat:
+            return True
+        pointer = seat.get_pointer()
+        if not pointer:
+            return True
+
+        _, px, py = pointer.get_position()
+        win_x, win_y = self.get_position()
+        alloc = self.get_allocation()
+
+        # Is physical cursor within the expanded window?
+        inside = (win_x <= px <= win_x + alloc.width and win_y <= py <= win_y + alloc.height)
+
+        if not inside:
+            if not self.retract_timer:
+                self.retract_timer = GLib.timeout_add(250, self._do_retract)
+        else:
+            self.cancel_retract()
+
+        return True
+
     # ─── Mouse Event Handling ───────────────────────────────────────
     def on_enter(self, widget, event):
-        if event.mode != Gdk.CrossingMode.NORMAL:
-            return False
         self.last_hover_time = time.time()
         self.expand()
         return True
 
     def on_leave(self, widget, event):
-        if event.mode != Gdk.CrossingMode.NORMAL:
-            return False
-
-        # Only retract if mouse has actually exited the active window
         alloc = self.get_allocation()
         if 0 <= event.x <= alloc.width and 0 <= event.y <= alloc.height:
             return False
 
         self.last_hover_time = time.time()
-        self.cancel_retract()
-        self.retract_timer = GLib.timeout_add(350, self._do_retract)
+        if not self.retract_timer:
+            self.retract_timer = GLib.timeout_add(250, self._do_retract)
         return True
 
     def _do_retract(self):
