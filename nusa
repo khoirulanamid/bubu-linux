@@ -126,6 +126,56 @@ def format_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 # ─── Universal AI Agent Client ──────────────────────────────────────
+def parse_llm_response(raw_text, is_anthropic_direct=False):
+    raw_text = raw_text.strip()
+    # 1. Try standard JSON first
+    if raw_text.startswith("{") and raw_text.endswith("}"):
+        try:
+            data = json.loads(raw_text)
+            if is_anthropic_direct:
+                if "content" in data and isinstance(data["content"], list):
+                    return data["content"][0].get("text", "")
+            if "choices" in data and len(data["choices"]) > 0:
+                choice = data["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    return choice["message"]["content"]
+                if "text" in choice:
+                    return choice["text"]
+            if "content" in data and isinstance(data["content"], list):
+                return data["content"][0].get("text", "")
+            if "error" in data:
+                err = data["error"]
+                return f"Error API: {err.get('message', str(err))}"
+        except Exception:
+            pass
+
+    # 2. If SSE stream (starts with 'data:' or contains 'data: ')
+    collected = []
+    lines = raw_text.splitlines()
+    for line in lines:
+        line = line.strip()
+        if not line or line == "data: [DONE]":
+            continue
+        if line.startswith("data:"):
+            chunk_str = line[5:].strip()
+            try:
+                chunk = json.loads(chunk_str)
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    delta = chunk["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        collected.append(content)
+            except Exception:
+                continue
+    if collected:
+        return "".join(collected)
+
+    try:
+        data = json.loads(raw_text)
+        return str(data)
+    except Exception:
+        return raw_text
+
 def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
     base_url = (base_url or "https://openrouter.ai/api/v1").rstrip("/")
     is_anthropic_direct = "anthropic.com" in base_url
@@ -154,7 +204,7 @@ def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
         if system_msg:
             payload["system"] = system_msg
 
-    else: # OpenAI / OpenRouter / DeepSeek / Ollama / Groq compatible
+    else: # OpenAI / OpenRouter / DeepSeek / Ollama / Local Proxy
         url = f"{base_url}/chat/completions" if not base_url.endswith("/chat/completions") else base_url
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -164,7 +214,8 @@ def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
             "model": model or "gpt-4o-mini",
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7
+            "temperature": 0.7,
+            "stream": False
         }
 
     req = urllib.request.Request(
@@ -175,12 +226,9 @@ def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
     )
 
     with urllib.request.urlopen(req, timeout=40, context=ctx) as resp:
-        res_data = json.loads(resp.read().decode("utf-8"))
+        raw_text = resp.read().decode("utf-8")
 
-    if is_anthropic_direct:
-        return res_data["content"][0]["text"]
-    else:
-        return res_data["choices"][0]["message"]["content"]
+    return parse_llm_response(raw_text, is_anthropic_direct)
 
 # ─── AI Settings Dialog Window ──────────────────────────────────────
 class AISettingsDialog(Gtk.Window):
@@ -218,11 +266,11 @@ class AISettingsDialog(Gtk.Window):
 
         preset_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         presets = [
+            ("Local Proxy", "http://localhost:20128/v1", "ag/gemini-3.8-flash-high"),
             ("OpenRouter", "https://openrouter.ai/api/v1", "anthropic/claude-3.5-sonnet"),
             ("Anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022"),
             ("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
-            ("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
-            ("Ollama", "http://localhost:11434/v1", "llama3")
+            ("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat")
         ]
 
         for name, url, model in presets:
