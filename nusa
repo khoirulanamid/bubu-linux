@@ -441,7 +441,8 @@ class NusaNotch(Gtk.Window):
         self.blink_progress = 0.0
         self.is_blinking = False
         self.last_hover_time = time.time()
-        self.next_blink_time = time.time() + 4.0
+        self.last_interaction_time = time.time()
+        self.next_blink_time = time.time() + 3.0
         self.sleepy_z = 0.0
 
         # Tabs: 0: Music, 1: Focus, 2: Shelf, 3: Water
@@ -585,7 +586,12 @@ class NusaNotch(Gtk.Window):
     # ─── Mouse Event Handling (Manual Click Only) ───────────────────
     def on_enter(self, widget, event):
         self.last_hover_time = time.time()
+        self.last_interaction_time = time.time()
         self.is_hovered = True
+        if self.mascot_state == "SLEEPY":
+            self.mascot_state = "AWAKE"
+            self.is_blinking = False
+            self.next_blink_time = time.time() + 2.5
         display = Gdk.Display.get_default()
         win = self.get_window()
         if win and display:
@@ -671,10 +677,19 @@ class NusaNotch(Gtk.Window):
                 )
 
         now = time.time()
-        if not self.is_expanded and (now - self.last_hover_time > 20.0):
-            self.mascot_state = "SLEEPY"
-        elif not self.is_expanded and self.mascot_state == "SLEEPY":
-            self.mascot_state = "AWAKE"
+        # If music is playing, mascot stays awake and sings
+        if self.active_player and self.active_player.get('status') == 'Playing':
+            self.last_interaction_time = now
+            if self.mascot_state == "SLEEPY":
+                self.mascot_state = "AWAKE"
+        else:
+            # 1 minute (60.0s) without interaction -> fall asleep
+            if not self.is_expanded and (now - self.last_interaction_time > 60.0):
+                if self.mascot_state != "SLEEPY":
+                    self.mascot_state = "SLEEPY"
+                    self.sleepy_z = 0.0
+            elif not self.is_expanded and self.mascot_state == "SLEEPY" and (now - self.last_interaction_time <= 60.0):
+                self.mascot_state = "AWAKE"
 
         self.queue_draw()
         if self.floating_player and self.floating_player.get_visible():
@@ -931,6 +946,10 @@ class NusaNotch(Gtk.Window):
 
     # ─── Content Click Interactions ─────────────────────────────────
     def on_button_press(self, widget, event):
+        self.last_interaction_time = time.time()
+        if self.mascot_state == "SLEEPY":
+            self.mascot_state = "AWAKE"
+
         if not self.is_expanded:
             self.expand()
             return True
@@ -1157,21 +1176,14 @@ class NusaNotch(Gtk.Window):
             PangoCairo.show_layout(cr, layout)
             return
 
-        # 3. Clean Centered Companion or Clock
-        now = time.time()
-        is_quiet = (now - self.last_hover_time > 15.0)
-
-        if is_quiet or self.mascot_state == "SLEEPY":
+        # 3. Mascot ALWAYS in Center of Idle Pill!
+        if self.is_hovered and not self.is_expanded:
+            prev = self.mascot_state
+            self.mascot_state = "HAPPY"
             self.draw_mascot_eyes(cr, cx, cy, alpha)
+            self.mascot_state = prev
         else:
-            font = Pango.FontDescription("Ubuntu, Sans Bold 10.5")
-            layout.set_font_description(font)
-            current_time = time.strftime("%H:%M")
-            layout.set_text(current_time, -1)
-            lw, lh = layout.get_pixel_size()
-            cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.95)
-            cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
-            PangoCairo.show_layout(cr, layout)
+            self.draw_mascot_eyes(cr, cx, cy, alpha)
 
     def draw_singing_mascot(self, cr, cx, cy, alpha=1.0):
         spacing = 9.5
@@ -1226,15 +1238,20 @@ class NusaNotch(Gtk.Window):
         cr.new_path()
 
         if self.mascot_state == "AWAKE" or self.mascot_state == "BLINK":
-            cr.set_source_rgba(0.92, 0.94, 0.98, alpha)
             for ex in [cx - spacing, cx + spacing]:
                 cr.save()
                 cr.translate(ex, cy)
                 cr.scale(rx, ry)
                 cr.new_sub_path()
                 cr.arc(0, 0, 1.0, 0, 2 * math.pi)
+                cr.set_source_rgba(0.92, 0.94, 0.98, alpha)
                 cr.fill()
                 cr.restore()
+                # Sparkle highlight when not fully closed
+                if self.blink_progress < 0.2:
+                    cr.set_source_rgba(0.05, 0.05, 0.06, alpha * 0.95)
+                    cr.arc(ex + 1.0, cy - 0.8, 0.9, 0, 2 * math.pi)
+                    cr.fill()
 
         elif self.mascot_state == "HAPPY":
             cr.set_source_rgba(0.92, 0.94, 0.98, alpha)
