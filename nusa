@@ -467,6 +467,7 @@ class NusaNotch(Gtk.Window):
 
         # State flags
         self.drag_hover = False
+        self.is_hovered = False
         self.retract_timer = None
         self.watchdog_id = 0
 
@@ -561,10 +562,6 @@ class NusaNotch(Gtk.Window):
         self.spring.set_target(1.0)
         self.ensure_animation()
 
-        # Start pointer watchdog to guarantee auto-close
-        if self.watchdog_id == 0:
-            self.watchdog_id = GLib.timeout_add(150, self.check_pointer_watchdog)
-
     def retract(self):
         self.cancel_retract()
         if not self.is_expanded:
@@ -587,55 +584,29 @@ class NusaNotch(Gtk.Window):
             self.retract_timer = None
 
     def check_pointer_watchdog(self):
-        if not self.is_expanded:
-            self.watchdog_id = 0
-            return False
-
-        display = Gdk.Display.get_default()
-        if not display:
-            return True
-        seat = display.get_default_seat()
-        if not seat:
-            return True
-        pointer = seat.get_pointer()
-        if not pointer:
-            return True
-
-        _, px, py = pointer.get_position()
-        win_x, win_y = self.get_position()
-        alloc = self.get_allocation()
-
-        # Is physical cursor within the expanded window?
-        inside = (win_x <= px <= win_x + alloc.width and win_y <= py <= win_y + alloc.height)
-
-        if not inside:
-            if not self.retract_timer:
-                self.retract_timer = GLib.timeout_add(250, self._do_retract)
-        else:
-            self.cancel_retract()
-
-        return True
+        return False
 
     # ─── Mouse Event Handling ───────────────────────────────────────
     def on_enter(self, widget, event):
         self.last_hover_time = time.time()
-        self.expand()
+        self.is_hovered = True
+        display = Gdk.Display.get_default()
+        win = self.get_window()
+        if win and display:
+            cursor = Gdk.Cursor.new_from_name(display, "pointer")
+            win.set_cursor(cursor)
+        self.queue_draw()
         return True
 
     def on_leave(self, widget, event):
-        alloc = self.get_allocation()
-        if 0 <= event.x <= alloc.width and 0 <= event.y <= alloc.height:
-            return False
-
         self.last_hover_time = time.time()
-        if not self.retract_timer:
-            self.retract_timer = GLib.timeout_add(250, self._do_retract)
+        self.is_hovered = False
+        display = Gdk.Display.get_default()
+        win = self.get_window()
+        if win and display:
+            win.set_cursor(None)
+        self.queue_draw()
         return True
-
-    def _do_retract(self):
-        self.retract()
-        self.retract_timer = None
-        return False
 
     # ─── Drag & Drop ────────────────────────────────────────────────
     def on_drag_motion(self, widget, context, x, y, time_val):
@@ -974,8 +945,8 @@ class NusaNotch(Gtk.Window):
         cur_w = self.IDLE_W + p * (self.EXP_W - self.IDLE_W)
         px = (self.EXP_W - cur_w) / 2.0
 
-        # Clicking top mascot area toggles retract
-        if y <= 28 and px <= x <= px + cur_w:
+        # Clicking top header area (Y <= 36) toggles retract
+        if y <= 36:
             self.retract()
             return True
 
@@ -1148,7 +1119,10 @@ class NusaNotch(Gtk.Window):
 
         # Glow Border
         accent = self.settings.get("theme_accent", [0.55, 0.50, 0.95])
-        border_alpha = 0.40 + p * 0.35 if not self.drag_hover else 0.95
+        if self.is_expanded:
+            border_alpha = 0.40 + p * 0.35 if not self.drag_hover else 0.95
+        else:
+            border_alpha = 0.85 if self.is_hovered else 0.40
         cr.set_source_rgba(accent[0], accent[1], accent[2], border_alpha)
         cr.set_line_width(1.2 + p * 0.6)
         cr.stroke()
@@ -1312,6 +1286,25 @@ class NusaNotch(Gtk.Window):
 
         # Mascot top center
         self.draw_mascot_eyes(cr, cx, 18.0, alpha)
+
+        # Close / Collapse Indicator on Top Right (at px + w - 24, 16)
+        cr.save()
+        cr.new_path()
+        cr.arc(px + w - 24, 16, 8.5, 0, 2 * math.pi)
+        cr.set_source_rgba(0.18, 0.22, 0.32, alpha * 0.70)
+        cr.fill_preserve()
+        cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.40)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8"))
+        layout.set_text("▲", -1)
+        cw, ch = layout.get_pixel_size()
+        cr.set_source_rgba(0.85, 0.88, 1.0, alpha * 0.90)
+        cr.move_to(px + w - 24 - cw / 2.0, 16 - ch / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
 
         # Tab Navigation
         tab_w = (w - 40) / len(self.tabs)
