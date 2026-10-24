@@ -3,14 +3,13 @@
 Nusa for Linux — A living, interactive notch for Linux desktop.
 Inspired by Nusa (https://rama2555.github.io/nusa/).
 
-Features:
-- Living companion mascot with blinking, sleepy, and happy eye expressions.
-- Fluid spring physics expansion on hover / drag-and-drop.
-- MPRIS Media Player controller (Spotify, YouTube, Chrome, Firefox, VLC).
-- Pomodoro Focus Timer with desktop notifications.
-- File Shelf: drag files to stash, 1-click open, or clear.
-- Daily Water hydration tracker.
-- Lightweight native GTK3 + Cairo (low CPU, ~30MB RAM).
+Engine v2.0:
+- Hardware-synced VSync (add_tick_callback) for 60/120 FPS buttery-smooth animation.
+- Fluid Apple/Nusa spring physics with organic overshoot bounce (damping ratio ~0.53).
+- Smooth layered cross-fade & vertical rise for all UI elements (zero pop-in).
+- Realistic blinking with eyelid interpolation & sleeping companion animations.
+- Filtered X11 crossing events to prevent any jitter or stuttering.
+- Full MPRIS Media Player integration, Pomodoro timer, File shelf, and Water tracker.
 """
 
 import gi
@@ -31,7 +30,6 @@ import urllib.parse
 import subprocess
 import fcntl
 
-# Configuration & Data paths
 CONFIG_DIR = os.path.expanduser("~/.config/nusa")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 SHELF_FILE = os.path.join(CONFIG_DIR, "shelf.json")
@@ -44,7 +42,7 @@ DEFAULT_SETTINGS = {
     "water_goal": 2000,
     "water_current": 500,
     "water_date": time.strftime("%Y-%m-%d"),
-    "theme_accent": [0.50, 0.47, 0.87], # Nusa Soft Violet
+    "theme_accent": [0.55, 0.50, 0.95], # Nusa Vibrant Purple
     "start_with_system": True
 }
 
@@ -55,7 +53,6 @@ def load_settings():
                 data = json.load(f)
                 s = dict(DEFAULT_SETTINGS)
                 s.update(data)
-                # Reset water tracker if new day
                 today = time.strftime("%Y-%m-%d")
                 if s.get("water_date") != today:
                     s["water_date"] = today
@@ -88,11 +85,16 @@ def save_shelf(shelf_items):
     except Exception as e:
         print("[Nusa] Error saving shelf:", e)
 
-# ─── Spring Physics Model ───────────────────────────────────────────
-class Spring:
-    def __init__(self, val, stiffness=230.0, damping=22.0):
-        self.val = float(val)
-        self.target = float(val)
+# ─── High Performance Fluid Spring ──────────────────────────────────
+class FluidSpring:
+    """
+    Simulates a damped harmonic oscillator with natural fluid elasticity.
+    stiffness=185, damping=14.5 yields a damping ratio of ~0.53,
+    producing an organic 8-10% elastic bloom before settling into rest.
+    """
+    def __init__(self, stiffness=185.0, damping=14.5):
+        self.val = 0.0
+        self.target = 0.0
         self.vel = 0.0
         self.stiffness = stiffness
         self.damping = damping
@@ -100,9 +102,9 @@ class Spring:
     def set_target(self, target):
         self.target = float(target)
 
-    def snap_to(self, val):
-        self.val = float(val)
-        self.target = float(val)
+    def snap_to(self, target):
+        self.val = float(target)
+        self.target = float(target)
         self.vel = 0.0
 
     def update(self, dt):
@@ -111,7 +113,7 @@ class Spring:
         acc = force - damping_force
         self.vel += acc * dt
         self.val += self.vel * dt
-        settled = (abs(self.target - self.val) < 0.2 and abs(self.vel) < 0.2)
+        settled = abs(self.target - self.val) < 0.002 and abs(self.vel) < 0.005
         if settled:
             self.val = self.target
             self.vel = 0.0
@@ -139,7 +141,6 @@ class MprisController:
             if not players:
                 return None
 
-            # Prioritize playing player, then first available
             best_player = None
             for p in players:
                 try:
@@ -194,7 +195,7 @@ class MprisController:
             except Exception as e:
                 print("[MPRIS] Previous error:", e)
 
-# ─── Main Nusa Window ───────────────────────────────────────────────
+# ─── Main Nusa Living Notch ─────────────────────────────────────────
 class NusaNotch(Gtk.Window):
     def __init__(self):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
@@ -211,52 +212,53 @@ class NusaNotch(Gtk.Window):
         self.BOX_H = 260
         self.set_default_size(self.BOX_W, self.BOX_H)
 
-        # Idle and Expanded dimensions
-        self.IDLE_W = 180.0
-        self.IDLE_H = 32.0
-        self.EXP_W = 440.0
-        self.EXP_H = 220.0
+        # Proportions
+        self.IDLE_W = 166.0
+        self.IDLE_H = 30.0
+        self.EXP_W = 430.0
+        self.EXP_H = 224.0
 
-        # State Springs
-        self.width_spring = Spring(self.IDLE_W, stiffness=240.0, damping=22.0)
-        self.height_spring = Spring(self.IDLE_H, stiffness=240.0, damping=22.0)
+        # Fluid Physics Animation Engine
+        self.spring = FluidSpring(stiffness=185.0, damping=14.5)
+        self.tick_id = 0
+        self.last_tick_us = 0
         self.is_expanded = False
-        self.is_animating = False
 
-        # Mascot State
-        # AWAKE, BLINK, HAPPY, SLEEPY
+        # Mascot States: AWAKE, BLINK, HAPPY, SLEEPY
         self.mascot_state = "AWAKE"
+        self.blink_progress = 0.0 # 0.0 (open) to 1.0 (closed)
+        self.is_blinking = False
         self.last_hover_time = time.time()
         self.next_blink_time = time.time() + 4.0
-        self.sleepy_z_offset = 0.0
+        self.sleepy_z = 0.0
 
-        # Active Tab: 0: Music, 1: Focus (Pomodoro), 2: Shelf, 3: Water
+        # Tabs: 0: Music, 1: Focus, 2: Shelf, 3: Water
         self.active_tab = 0
         self.tabs = ["Music", "Focus", "Shelf", "Water"]
 
-        # Data & Controllers
+        # Controllers & Data
         self.settings = load_settings()
         self.shelf_items = load_shelf()
         self.mpris = MprisController()
         self.active_player = None
 
-        # Pomodoro variables
+        # Pomodoro
         self.pomo_running = False
         self.pomo_time_left = self.settings.get("pomodoro_duration", 25 * 60)
-        self.pomo_total = self.pomo_time_left
 
-        # Drag & drop state
+        # State flags
+        self.mouse_inside = False
         self.drag_hover = False
         self.retract_timer = None
 
-        # RGBA Transparency
+        # RGBA visual
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         if visual:
             self.set_visual(visual)
         self.set_app_paintable(True)
 
-        # Event connections
+        # Connect GDK events
         self.connect("draw", self.on_draw)
         self.connect("realize", self.on_realize)
         self.add_events(
@@ -267,18 +269,19 @@ class NusaNotch(Gtk.Window):
         )
         self.connect("enter-notify-event", self.on_enter)
         self.connect("leave-notify-event", self.on_leave)
+        self.connect("motion-notify-event", self.on_motion)
         self.connect("button-press-event", self.on_button_press)
 
-        # Drag and drop destination
+        # Drag & drop setup
         self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
         self.drag_dest_add_uri_targets()
         self.connect("drag-motion", self.on_drag_motion)
         self.connect("drag-leave", self.on_drag_leave)
         self.connect("drag-data-received", self.on_drag_drop)
 
-        # Timers
+        # Background tickers
         GLib.timeout_add(1000, self.on_second_tick)
-        GLib.timeout_add(80, self.on_mascot_tick)
+        GLib.timeout_add(30, self.on_fast_tick)
 
         self.reposition()
         self.show_all()
@@ -303,34 +306,35 @@ class NusaNotch(Gtk.Window):
         gdk_win = self.get_window()
         if not gdk_win:
             return
-        if self.is_expanded or self.is_animating:
-            # Let full card receive mouse clicks
+        if self.is_expanded:
+            # Full card active for user interaction
             gdk_win.input_shape_combine_region(None, 0, 0)
         else:
-            # Mask to idle pill only
-            cur_w = int(self.width_spring.val)
-            cur_h = int(self.height_spring.val)
-            px = (self.BOX_W - cur_w) // 2
-            rect = cairo.RectangleInt(px, 0, cur_w, cur_h)
+            # Idle: mask to small pill so background apps remain 100% click-through
+            px = int((self.BOX_W - self.IDLE_W) // 2)
+            rect = cairo.RectangleInt(px, 0, int(self.IDLE_W), int(self.IDLE_H))
             region = cairo.Region(rect)
             gdk_win.input_shape_combine_region(region, 0, 0)
 
-    # ─── Animation Loop (60 FPS) ────────────────────────────────────
-    def start_animation(self):
-        if not self.is_animating:
-            self.is_animating = True
-            self.update_input_shape()
-            GLib.timeout_add(16, self.on_anim_step)
+    # ─── VSync Frame Animation Engine ───────────────────────────────
+    def ensure_animation(self):
+        if self.tick_id == 0:
+            self.last_tick_us = 0
+            self.tick_id = self.add_tick_callback(self.on_frame_tick)
 
-    def on_anim_step(self):
-        dt = 0.016
-        settled_w = self.width_spring.update(dt)
-        settled_h = self.height_spring.update(dt)
+    def on_frame_tick(self, widget, frame_clock):
+        now_us = frame_clock.get_frame_time()
+        if self.last_tick_us == 0:
+            dt = 0.016
+        else:
+            dt = min(0.04, max(0.005, (now_us - self.last_tick_us) / 1000000.0))
+        self.last_tick_us = now_us
 
+        settled = self.spring.update(dt)
         self.queue_draw()
 
-        if settled_w and settled_h:
-            self.is_animating = False
+        if settled:
+            self.tick_id = 0
             self.update_input_shape()
             return False
         return True
@@ -338,45 +342,73 @@ class NusaNotch(Gtk.Window):
     def expand(self):
         self.cancel_retract()
         self.is_expanded = True
+        self.mouse_inside = True
         self.mascot_state = "HAPPY"
-        self.width_spring.set_target(self.EXP_W)
-        self.height_spring.set_target(self.EXP_H)
-        self.start_animation()
+        self.spring.set_target(1.0)
+        # Unlock input shape as soon as expansion begins so controls are responsive
+        gdk_win = self.get_window()
+        if gdk_win:
+            gdk_win.input_shape_combine_region(None, 0, 0)
+        self.ensure_animation()
 
     def retract(self):
         self.is_expanded = False
+        self.mouse_inside = False
         self.drag_hover = False
         self.mascot_state = "AWAKE"
-        self.width_spring.set_target(self.IDLE_W)
-        self.height_spring.set_target(self.IDLE_H)
-        self.start_animation()
+        self.spring.set_target(0.0)
+        self.ensure_animation()
 
     def cancel_retract(self):
         if self.retract_timer:
             GLib.source_remove(self.retract_timer)
             self.retract_timer = None
 
-    # ─── Events ─────────────────────────────────────────────────────
+    # ─── Mouse & Crossing Event Handling ────────────────────────────
     def on_enter(self, widget, event):
+        # Filter synthetic X11 shape crossing events
+        if event.mode != Gdk.CrossingMode.NORMAL:
+            return False
         self.last_hover_time = time.time()
         self.expand()
+        return True
 
     def on_leave(self, widget, event):
+        if event.mode != Gdk.CrossingMode.NORMAL:
+            return False
+        # Calculate current geometry to check if cursor truly left the notch
+        p = max(0.0, self.spring.val)
+        cur_w = self.IDLE_W + p * (self.EXP_W - self.IDLE_W)
+        cur_h = self.IDLE_H + p * (self.EXP_H - self.IDLE_H)
+        px = (self.BOX_W - cur_w) / 2.0
+
+        # If pointer is still within the visible notch, ignore the event
+        if px <= event.x <= px + cur_w and 0 <= event.y <= cur_h:
+            return False
+
         self.last_hover_time = time.time()
         self.cancel_retract()
-        # Debounce retraction slightly
-        self.retract_timer = GLib.timeout_add(450, self._do_retract)
+        # Generous debounce delay so switching between buttons doesn't collapse card
+        self.retract_timer = GLib.timeout_add(350, self._do_retract)
+        return True
+
+    def on_motion(self, widget, event):
+        self.last_hover_time = time.time()
+        if not self.is_expanded and event.y <= self.IDLE_H + 4:
+            self.expand()
+        return False
 
     def _do_retract(self):
         self.retract()
         self.retract_timer = None
         return False
 
+    # ─── Drag & Drop ────────────────────────────────────────────────
     def on_drag_motion(self, widget, context, x, y, time_val):
         self.cancel_retract()
         if not self.is_expanded:
             self.drag_hover = True
-            self.active_tab = 2 # Automatically switch to File Shelf
+            self.active_tab = 2 # File Shelf
             self.expand()
         Gdk.drag_status(context, Gdk.DragAction.COPY, time_val)
         return True
@@ -394,7 +426,6 @@ class NusaNotch(Gtk.Window):
                 if u.startswith("file://"):
                     p = urllib.parse.unquote(urllib.parse.urlparse(u).path)
                     if os.path.exists(p):
-                        # Add to shelf if not present
                         if not any(item['path'] == p for item in self.shelf_items):
                             name = os.path.basename(p)
                             size_str = self.format_size(os.path.getsize(p)) if not os.path.isdir(p) else "Folder"
@@ -405,7 +436,7 @@ class NusaNotch(Gtk.Window):
                                 "is_dir": os.path.isdir(p)
                             })
             save_shelf(self.shelf_items)
-            self.active_tab = 2 # Show shelf
+            self.active_tab = 2
             self.queue_draw()
             subprocess.Popen(
                 ["notify-send", "-a", "Nusa", "Nusa File Shelf", f"Menyimpan {len(uris)} file ke shelf."],
@@ -420,12 +451,10 @@ class NusaNotch(Gtk.Window):
         else:
             return f"{size_bytes / (1024 * 1024):.1f} MB"
 
-    # ─── Periodic Ticks ─────────────────────────────────────────────
+    # ─── Periodic Tickers ───────────────────────────────────────────
     def on_second_tick(self):
-        # Update media player info
         self.active_player = self.mpris.get_active_player()
 
-        # Update Pomodoro
         if self.pomo_running and self.pomo_time_left > 0:
             self.pomo_time_left -= 1
             if self.pomo_time_left == 0:
@@ -435,7 +464,6 @@ class NusaNotch(Gtk.Window):
                     env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority"))
                 )
 
-        # Mascot sleep logic: if idle for > 25 seconds
         now = time.time()
         if not self.is_expanded and (now - self.last_hover_time > 25.0):
             self.mascot_state = "SLEEPY"
@@ -445,38 +473,42 @@ class NusaNotch(Gtk.Window):
         self.queue_draw()
         return True
 
-    def on_mascot_tick(self):
+    def on_fast_tick(self):
         now = time.time()
         if self.mascot_state == "AWAKE":
-            if now >= self.next_blink_time:
-                self.mascot_state = "BLINK"
-                GLib.timeout_add(180, self._end_blink)
-                self.next_blink_time = now + 3.5 + (hash(str(now)) % 30) / 10.0
+            if not self.is_blinking and now >= self.next_blink_time:
+                self.is_blinking = True
+                self.blink_start = now
+            if self.is_blinking:
+                dt = now - self.blink_start
+                if dt < 0.12:
+                    self.blink_progress = dt / 0.12
+                elif dt < 0.24:
+                    self.blink_progress = 1.0 - (dt - 0.12) / 0.12
+                else:
+                    self.is_blinking = False
+                    self.blink_progress = 0.0
+                    self.next_blink_time = now + 3.0 + (hash(str(now)) % 30) / 10.0
                 self.queue_draw()
+
         elif self.mascot_state == "SLEEPY":
-            # Floating zZ animation
-            self.sleepy_z_offset = (self.sleepy_z_offset + 0.08) % 6.0
+            self.sleepy_z = (self.sleepy_z + 0.07) % 6.0
             self.queue_draw()
+
         return True
 
-    def _end_blink(self):
-        if self.mascot_state == "BLINK":
-            self.mascot_state = "AWAKE"
-            self.queue_draw()
-        return False
-
-    # ─── Button Clicks in Expanded State ─────────────────────────────
+    # ─── Content Click Interactions ─────────────────────────────────
     def on_button_press(self, widget, event):
         if not self.is_expanded:
             self.expand()
             return True
 
         x, y = event.x, event.y
-        cur_w = self.width_spring.val
-        cur_h = self.height_spring.val
-        px = (self.BOX_W - cur_w) // 2
+        p = max(0.0, self.spring.val)
+        cur_w = self.IDLE_W + p * (self.EXP_W - self.IDLE_W)
+        px = (self.BOX_W - cur_w) / 2.0
 
-        # 1. Tab Bar Navigation (Y: ~42 to ~70)
+        # 1. Tab Navigation
         if 42 <= y <= 72:
             tab_w = (cur_w - 40) / len(self.tabs)
             for i in range(len(self.tabs)):
@@ -486,72 +518,64 @@ class NusaNotch(Gtk.Window):
                     self.queue_draw()
                     return True
 
-        # 2. Content Area Interactions (Y: > 80)
-        if self.active_tab == 0:
-            # Music Player Controls
-            btn_y = 155
-            # Prev, Play/Pause, Next
+        # 2. Content Interactions
+        if self.active_tab == 0: # Music
+            btn_y = 158
             cx = self.BOX_W // 2
-            if btn_y - 20 <= y <= btn_y + 20:
-                if cx - 60 <= x <= cx - 20: # Prev
+            if btn_y - 22 <= y <= btn_y + 22:
+                if cx - 65 <= x <= cx - 25:
                     self.mpris.previous(self.active_player)
                     return True
-                elif cx - 20 <= x <= cx + 20: # Play/Pause
+                elif cx - 24 <= x <= cx + 24:
                     self.mpris.play_pause(self.active_player)
                     return True
-                elif cx + 20 <= x <= cx + 60: # Next
+                elif cx + 25 <= x <= cx + 65:
                     self.mpris.next(self.active_player)
                     return True
 
-        elif self.active_tab == 1:
-            # Pomodoro Controls (Start/Pause, Reset)
-            btn_y = 165
+        elif self.active_tab == 1: # Focus
+            btn_y = 166
             cx = self.BOX_W // 2
             if btn_y - 18 <= y <= btn_y + 18:
-                if cx - 90 <= x <= cx - 10: # Start / Pause
+                if cx - 95 <= x <= cx - 10:
                     self.pomo_running = not self.pomo_running
                     self.queue_draw()
                     return True
-                elif cx + 10 <= x <= cx + 90: # Reset
+                elif cx + 10 <= x <= cx + 95:
                     self.pomo_running = False
                     self.pomo_time_left = self.settings.get("pomodoro_duration", 25 * 60)
                     self.queue_draw()
                     return True
 
-        elif self.active_tab == 2:
-            # File Shelf Interactions
-            # Clear button (top right of shelf)
+        elif self.active_tab == 2: # Shelf
             if px + cur_w - 90 <= x <= px + cur_w - 20 and 85 <= y <= 110:
                 self.shelf_items = []
                 save_shelf(self.shelf_items)
                 self.queue_draw()
                 return True
 
-            # Click items to open
             item_y = 120
-            for idx, item in enumerate(self.shelf_items[:3]):
+            for item in self.shelf_items[-3:]:
                 if px + 20 <= x <= px + cur_w - 20 and item_y <= y <= item_y + 28:
-                    # Open with xdg-open
                     subprocess.Popen(["xdg-open", item["path"]])
                     return True
                 item_y += 32
 
-        elif self.active_tab == 3:
-            # Water Tracker (+250ml, +500ml, Reset)
-            btn_y = 165
+        elif self.active_tab == 3: # Water
+            btn_y = 166
             cx = self.BOX_W // 2
             if btn_y - 18 <= y <= btn_y + 18:
-                if cx - 100 <= x <= cx - 35: # +250ml
+                if cx - 105 <= x <= cx - 35:
                     self.settings["water_current"] += 250
                     save_settings(self.settings)
                     self.queue_draw()
                     return True
-                elif cx - 30 <= x <= cx + 35: # +500ml
+                elif cx - 30 <= x <= cx + 40:
                     self.settings["water_current"] += 500
                     save_settings(self.settings)
                     self.queue_draw()
                     return True
-                elif cx + 40 <= x <= cx + 100: # Reset
+                elif cx + 45 <= x <= cx + 105:
                     self.settings["water_current"] = 0
                     save_settings(self.settings)
                     self.queue_draw()
@@ -559,33 +583,45 @@ class NusaNotch(Gtk.Window):
 
         return True
 
-    # ─── Cairo Drawing Engine ───────────────────────────────────────
+    # ─── Cairo Render Pipeline ──────────────────────────────────────
     def on_draw(self, widget, cr):
-        # Clear entire viewport to transparent
         cr.set_source_rgba(0, 0, 0, 0)
         cr.set_operator(cairo.OPERATOR_SOURCE)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
 
-        cur_w = self.width_spring.val
-        cur_h = self.height_spring.val
+        # Dynamic geometry driven by physics spring
+        p = max(0.0, self.spring.val)
+        cur_w = self.IDLE_W + p * (self.EXP_W - self.IDLE_W)
+        cur_h = self.IDLE_H + p * (self.EXP_H - self.IDLE_H)
+        cur_r = 15.0 + min(1.0, p) * 13.0 # smoothly transitions from 15px pill to 28px card
         px = (self.BOX_W - cur_w) / 2.0
         py = 0.0
 
-        # Draw Living Notch Container
-        self.draw_capsule(cr, px, py, cur_w, cur_h)
+        # Draw Fluid Capsule Background
+        self.draw_fluid_capsule(cr, px, py, cur_w, cur_h, cur_r, p)
 
-        if not self.is_expanded and cur_h <= 45.0:
-            self.draw_idle_content(cr, px, py, cur_w, cur_h)
-        else:
-            self.draw_expanded_content(cr, px, py, cur_w, cur_h)
+        # Layered Cross-fade:
+        # Idle elements fade out as p goes 0.0 -> 0.35
+        idle_alpha = max(0.0, 1.0 - p * 3.0)
+        if idle_alpha > 0.01:
+            cr.save()
+            self.draw_idle_elements(cr, px, py, cur_w, cur_h, idle_alpha)
+            cr.restore()
+
+        # Expanded elements fade in and slide up as p goes 0.25 -> 1.0
+        exp_alpha = max(0.0, min(1.0, (p - 0.25) / 0.75))
+        if exp_alpha > 0.01:
+            slide_y = (1.0 - exp_alpha) * 8.0
+            cr.save()
+            cr.translate(0, -slide_y)
+            self.draw_expanded_elements(cr, px, py, cur_w, cur_h, exp_alpha)
+            cr.restore()
 
         return False
 
-    def draw_capsule(self, cr, px, py, w, h):
-        r = min(22.0, h / 2.0)
-
-        # Smooth curved bottom card
+    def draw_fluid_capsule(self, cr, px, py, w, h, r, p):
+        # Smooth rounded bottom path
         cr.new_sub_path()
         cr.move_to(px, 0)
         cr.line_to(px + w, 0)
@@ -595,28 +631,25 @@ class NusaNotch(Gtk.Window):
         cr.arc(px + r, h - r, r, math.pi / 2, math.pi)
         cr.close_path()
 
-        # Obsidian Glass Background
+        # Rich Dark Obsidian Glass Gradient
         grad = cairo.LinearGradient(px, 0, px, h)
-        grad.add_color_stop_rgba(0, 0.06, 0.07, 0.11, 0.96)
-        grad.add_color_stop_rgba(1, 0.08, 0.09, 0.15, 0.98)
+        grad.add_color_stop_rgba(0, 0.05, 0.06, 0.10, 0.96)
+        grad.add_color_stop_rgba(1, 0.08, 0.09, 0.14, 0.98)
         cr.set_source(grad)
         cr.fill_preserve()
 
-        # Ambient Glow Border
-        accent = self.settings.get("theme_accent", [0.50, 0.47, 0.87])
-        if self.drag_hover:
-            cr.set_source_rgba(accent[0], accent[1], accent[2], 0.9)
-            cr.set_line_width(2.2)
-        else:
-            cr.set_source_rgba(accent[0], accent[1], accent[2], 0.45)
-            cr.set_line_width(1.3)
+        # Dynamic Ambient Glow Border
+        accent = self.settings.get("theme_accent", [0.55, 0.50, 0.95])
+        border_alpha = 0.40 + p * 0.35 if not self.drag_hover else 0.95
+        cr.set_source_rgba(accent[0], accent[1], accent[2], border_alpha)
+        cr.set_line_width(1.2 + p * 0.6)
         cr.stroke()
 
-    def draw_idle_content(self, cr, px, py, w, h):
+    def draw_idle_elements(self, cr, px, py, w, h, alpha):
         cx = self.BOX_W / 2.0
         cy = h / 2.0
 
-        # 1. Digital Clock (Left side)
+        # Clock
         layout = PangoCairo.create_layout(cr)
         font = Pango.FontDescription("Ubuntu, Sans Bold 10")
         layout.set_font_description(font)
@@ -624,90 +657,85 @@ class NusaNotch(Gtk.Window):
         layout.set_text(current_time, -1)
         lw, lh = layout.get_pixel_size()
 
-        cr.set_source_rgba(0.9, 0.92, 0.98, 0.95)
+        cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.95)
         cr.move_to(px + 14, cy - lh / 2.0)
         PangoCairo.show_layout(cr, layout)
 
-        # 2. Living Mascot Eyes (Center)
-        self.draw_mascot_eyes(cr, cx, cy)
+        # Mascot Eyes
+        self.draw_mascot_eyes(cr, cx, cy, alpha)
 
-        # 3. Status indicator (Right side: media icon or dot)
+        # Status Icon (Right side)
         if self.active_player and self.active_player.get('status') == 'Playing':
-            cr.set_source_rgba(0.29, 0.87, 0.50, 0.95) # Green music pulse
+            cr.set_source_rgba(0.29, 0.87, 0.50, alpha)
             layout.set_text("♫", -1)
         elif self.pomo_running:
-            cr.set_source_rgba(0.98, 0.45, 0.45, 0.95) # Red focus pulse
+            cr.set_source_rgba(0.98, 0.45, 0.45, alpha)
             mins = self.pomo_time_left // 60
             secs = self.pomo_time_left % 60
             layout.set_text(f"{mins}:{secs:02d}", -1)
         else:
-            accent = self.settings.get("theme_accent", [0.50, 0.47, 0.87])
-            cr.set_source_rgba(accent[0], accent[1], accent[2], 0.8)
+            accent = self.settings.get("theme_accent", [0.55, 0.50, 0.95])
+            cr.set_source_rgba(accent[0], accent[1], accent[2], alpha * 0.85)
             layout.set_text("●", -1)
 
         rw, rh = layout.get_pixel_size()
         cr.move_to(px + w - rw - 14, cy - rh / 2.0)
         PangoCairo.show_layout(cr, layout)
 
-    def draw_mascot_eyes(self, cr, cx, cy):
-        eye_spacing = 11.0
-        r = 3.6
+    def draw_mascot_eyes(self, cr, cx, cy, alpha=1.0):
+        spacing = 10.5
+        rx = 3.6
+        # In AWAKE state, eyelid interpolation narrows ry
+        ry = rx * max(0.1, 1.0 - self.blink_progress)
 
         cr.save()
-        if self.mascot_state == "AWAKE":
-            # Round glowing eyes
-            cr.arc(cx - eye_spacing, cy, r, 0, 2 * math.pi)
-            cr.arc(cx + eye_spacing, cy, r, 0, 2 * math.pi)
-            cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+        if self.mascot_state == "AWAKE" or self.mascot_state == "BLINK":
+            # Smoothly animated ellipse eyes (natural blinking)
+            for ex in [cx - spacing, cx + spacing]:
+                cr.save()
+                cr.translate(ex, cy)
+                cr.scale(rx, ry)
+                cr.arc(0, 0, 1.0, 0, 2 * math.pi)
+                cr.restore()
+            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
             cr.fill()
-        elif self.mascot_state == "BLINK":
-            # Closed line eyes
-            cr.set_line_width(2.0)
-            cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(cx - eye_spacing - r, cy)
-            cr.line_to(cx - eye_spacing + r, cy)
-            cr.move_to(cx + eye_spacing - r, cy)
-            cr.line_to(cx + eye_spacing + r, cy)
-            cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
-            cr.stroke()
+
         elif self.mascot_state == "HAPPY":
-            # Happy curved joyful eyes ^ ^
+            # Curved joyful arcs ^ ^
             cr.set_line_width(2.0)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            # Left arc
-            cr.arc(cx - eye_spacing, cy + 1, r, math.pi + 0.3, 2 * math.pi - 0.3)
-            cr.stroke()
-            # Right arc
-            cr.arc(cx + eye_spacing, cy + 1, r, math.pi + 0.3, 2 * math.pi - 0.3)
-            cr.stroke()
-        elif self.mascot_state == "SLEEPY":
-            # Sleepy flat eyes - - with floating z
-            cr.set_line_width(1.8)
-            cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(cx - eye_spacing - r + 0.5, cy)
-            cr.line_to(cx - eye_spacing + r - 0.5, cy)
-            cr.move_to(cx + eye_spacing - r + 0.5, cy)
-            cr.line_to(cx + eye_spacing + r - 0.5, cy)
-            cr.set_source_rgba(0.7, 0.75, 0.88, 0.8)
+            cr.arc(cx - spacing, cy + 1, rx, math.pi + 0.35, 2 * math.pi - 0.35)
+            cr.arc(cx + spacing, cy + 1, rx, math.pi + 0.35, 2 * math.pi - 0.35)
+            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
             cr.stroke()
 
-            # Floating z
+        elif self.mascot_state == "SLEEPY":
+            # Resting eyes - - with floating zZ
+            cr.set_line_width(1.8)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.move_to(cx - spacing - rx, cy)
+            cr.line_to(cx - spacing + rx, cy)
+            cr.move_to(cx + spacing - rx, cy)
+            cr.line_to(cx + spacing + rx, cy)
+            cr.set_source_rgba(0.70, 0.75, 0.88, alpha * 0.85)
+            cr.stroke()
+
             layout = PangoCairo.create_layout(cr)
             font = Pango.FontDescription("Ubuntu, Sans 8")
             layout.set_font_description(font)
             layout.set_text("z", -1)
-            cr.move_to(cx + eye_spacing + 7, cy - 4 - self.sleepy_z_offset)
-            cr.set_source_rgba(0.50, 0.47, 0.87, 0.85)
+            cr.move_to(cx + spacing + 7, cy - 3 - self.sleepy_z)
+            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.85)
             PangoCairo.show_layout(cr, layout)
         cr.restore()
 
-    def draw_expanded_content(self, cr, px, py, w, h):
+    def draw_expanded_elements(self, cr, px, py, w, h, alpha):
         cx = self.BOX_W / 2.0
 
-        # Mascot & mini notch at top
-        self.draw_mascot_eyes(cr, cx, 18.0)
+        # Mascot centered at top
+        self.draw_mascot_eyes(cr, cx, 18.0, alpha)
 
-        # Tab Navigation (Y: 36 - 68)
+        # Tab Navigation
         tab_w = (w - 40) / len(self.tabs)
         tab_y = 38.0
         tab_h = 26.0
@@ -716,26 +744,26 @@ class NusaNotch(Gtk.Window):
             tx = px + 20 + i * tab_w
             is_active = (i == self.active_tab)
 
-            # Tab pill background
+            # Tab capsule
             cr.save()
+            r = 7.0
             cr.new_sub_path()
-            cr.arc(tx + 10, tab_y + 10, 8, math.pi, math.pi * 1.5)
-            cr.arc(tx + tab_w - 10, tab_y + 10, 8, math.pi * 1.5, 0)
-            cr.arc(tx + tab_w - 10, tab_y + tab_h - 10, 8, 0, math.pi * 0.5)
-            cr.arc(tx + 10, tab_y + tab_h - 10, 8, math.pi * 0.5, math.pi)
+            cr.arc(tx + r, tab_y + r, r, math.pi, math.pi * 1.5)
+            cr.arc(tx + tab_w - r, tab_y + r, r, math.pi * 1.5, 0)
+            cr.arc(tx + tab_w - r, tab_y + tab_h - r, r, 0, math.pi * 0.5)
+            cr.arc(tx + r, tab_y + tab_h - r, r, math.pi * 0.5, math.pi)
             cr.close_path()
 
             if is_active:
-                cr.set_source_rgba(0.50, 0.47, 0.87, 0.4)
+                cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.40)
                 cr.fill_preserve()
-                cr.set_source_rgba(0.50, 0.47, 0.87, 0.8)
+                cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.85)
                 cr.set_line_width(1.2)
                 cr.stroke()
             else:
-                cr.set_source_rgba(0.12, 0.14, 0.20, 0.4)
+                cr.set_source_rgba(0.12, 0.14, 0.22, alpha * 0.45)
                 cr.fill()
 
-            # Tab label
             layout = PangoCairo.create_layout(cr)
             font = Pango.FontDescription("Ubuntu, Sans Bold 9")
             layout.set_font_description(font)
@@ -743,31 +771,31 @@ class NusaNotch(Gtk.Window):
             tw, th = layout.get_pixel_size()
 
             if is_active:
-                cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+                cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
             else:
-                cr.set_source_rgba(0.65, 0.68, 0.80, 0.8)
+                cr.set_source_rgba(0.68, 0.72, 0.85, alpha * 0.75)
             cr.move_to(tx + (tab_w - tw) / 2.0, tab_y + (tab_h - th) / 2.0)
             PangoCairo.show_layout(cr, layout)
             cr.restore()
 
         # Divider line
-        cr.move_to(px + 20, 74)
-        cr.line_to(px + w - 20, 74)
-        cr.set_source_rgba(0.50, 0.47, 0.87, 0.25)
+        cr.move_to(px + 22, 73)
+        cr.line_to(px + w - 22, 73)
+        cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.22)
         cr.set_line_width(1.0)
         cr.stroke()
 
         # Render Active Tab Content
         if self.active_tab == 0:
-            self.draw_music_tab(cr, px, w, h)
+            self.draw_music_tab(cr, px, w, h, alpha)
         elif self.active_tab == 1:
-            self.draw_focus_tab(cr, px, w, h)
+            self.draw_focus_tab(cr, px, w, h, alpha)
         elif self.active_tab == 2:
-            self.draw_shelf_tab(cr, px, w, h)
+            self.draw_shelf_tab(cr, px, w, h, alpha)
         elif self.active_tab == 3:
-            self.draw_water_tab(cr, px, w, h)
+            self.draw_water_tab(cr, px, w, h, alpha)
 
-    def draw_music_tab(self, cr, px, w, h):
+    def draw_music_tab(self, cr, px, w, h, alpha):
         cx = self.BOX_W / 2.0
         layout = PangoCairo.create_layout(cr)
 
@@ -786,7 +814,7 @@ class NusaNotch(Gtk.Window):
             layout.set_font_description(font)
             layout.set_text(title, -1)
             tw, th = layout.get_pixel_size()
-            cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
             cr.move_to(cx - tw / 2.0, 94)
             PangoCairo.show_layout(cr, layout)
 
@@ -795,33 +823,29 @@ class NusaNotch(Gtk.Window):
             layout.set_font_description(font)
             layout.set_text(artist, -1)
             tw, th = layout.get_pixel_size()
-            cr.set_source_rgba(0.65, 0.70, 0.85, 0.85)
+            cr.set_source_rgba(0.68, 0.72, 0.85, alpha * 0.85)
             cr.move_to(cx - tw / 2.0, 116)
             PangoCairo.show_layout(cr, layout)
 
-            # Media Controls (⏮ ⏯ ⏭)
-            btn_y = 155
-            # Prev
-            self.draw_circle_btn(cr, cx - 40, btn_y, 16, "⏮")
-            # Play / Pause
+            # Controls
+            btn_y = 158
+            self.draw_circle_btn(cr, cx - 42, btn_y, 16, "⏮", alpha=alpha)
             symbol = "⏸" if status == "Playing" else "▶"
-            self.draw_circle_btn(cr, cx, btn_y, 20, symbol, highlight=True)
-            # Next
-            self.draw_circle_btn(cr, cx + 40, btn_y, 16, "⏭")
+            self.draw_circle_btn(cr, cx, btn_y, 20, symbol, highlight=True, alpha=alpha)
+            self.draw_circle_btn(cr, cx + 42, btn_y, 16, "⏭", alpha=alpha)
         else:
             font = Pango.FontDescription("Ubuntu, Sans 11")
             layout.set_font_description(font)
             layout.set_text("Tidak ada musik yang sedang diputar", -1)
             tw, th = layout.get_pixel_size()
-            cr.set_source_rgba(0.60, 0.65, 0.78, 0.75)
-            cr.move_to(cx - tw / 2.0, 120)
+            cr.set_source_rgba(0.60, 0.65, 0.78, alpha * 0.75)
+            cr.move_to(cx - tw / 2.0, 122)
             PangoCairo.show_layout(cr, layout)
 
-    def draw_focus_tab(self, cr, px, w, h):
+    def draw_focus_tab(self, cr, px, w, h, alpha):
         cx = self.BOX_W / 2.0
         layout = PangoCairo.create_layout(cr)
 
-        # Big Timer Display (e.g. 25:00)
         mins = self.pomo_time_left // 60
         secs = self.pomo_time_left % 60
         font = Pango.FontDescription("Ubuntu, Monospace Bold 26")
@@ -829,38 +853,35 @@ class NusaNotch(Gtk.Window):
         layout.set_text(f"{mins:02d}:{secs:02d}", -1)
         tw, th = layout.get_pixel_size()
 
-        cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+        cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
         cr.move_to(cx - tw / 2.0, 95)
         PangoCairo.show_layout(cr, layout)
 
-        # Action Buttons: Start/Pause, Reset
-        btn_y = 165
+        btn_y = 166
         label = "JEDA" if self.pomo_running else "MULAI FOKUS"
-        self.draw_rect_btn(cr, cx - 90, btn_y - 14, 80, 28, label, highlight=self.pomo_running)
-        self.draw_rect_btn(cr, cx + 10, btn_y - 14, 80, 28, "RESET")
+        self.draw_rect_btn(cr, cx - 92, btn_y - 14, 84, 28, label, highlight=self.pomo_running, alpha=alpha)
+        self.draw_rect_btn(cr, cx + 10, btn_y - 14, 84, 28, "RESET", alpha=alpha)
 
-    def draw_shelf_tab(self, cr, px, w, h):
+    def draw_shelf_tab(self, cr, px, w, h, alpha):
         layout = PangoCairo.create_layout(cr)
 
-        # Header & Clear button
         font = Pango.FontDescription("Ubuntu, Sans Bold 10")
         layout.set_font_description(font)
         layout.set_text(f"LACI FILE ({len(self.shelf_items)})", -1)
-        cr.set_source_rgba(0.70, 0.74, 0.88, 0.9)
+        cr.set_source_rgba(0.70, 0.74, 0.88, alpha * 0.9)
         cr.move_to(px + 22, 88)
         PangoCairo.show_layout(cr, layout)
 
         if self.shelf_items:
-            self.draw_rect_btn(cr, px + w - 75, 84, 55, 22, "KOSONGKAN", font_size=8)
+            self.draw_rect_btn(cr, px + w - 75, 84, 55, 22, "KOSONGKAN", font_size=8, alpha=alpha)
 
-        # File List or Drop Guide
         if not self.shelf_items:
             font = Pango.FontDescription("Ubuntu, Sans 10")
             layout.set_font_description(font)
             layout.set_text("⇣ Seret & lepas file ke sini untuk menyimpan", -1)
             tw, th = layout.get_pixel_size()
-            cr.set_source_rgba(0.55, 0.60, 0.75, 0.7)
-            cr.move_to(self.BOX_W / 2.0 - tw / 2.0, 135)
+            cr.set_source_rgba(0.55, 0.60, 0.75, alpha * 0.7)
+            cr.move_to(self.BOX_W / 2.0 - tw / 2.0, 136)
             PangoCairo.show_layout(cr, layout)
         else:
             item_y = 115
@@ -870,33 +891,30 @@ class NusaNotch(Gtk.Window):
                     name = name[:26] + "..."
                 size = item.get("size", "")
 
-                # Item box
                 cr.save()
                 cr.rectangle(px + 20, item_y, w - 40, 26)
-                cr.set_source_rgba(0.12, 0.14, 0.22, 0.6)
+                cr.set_source_rgba(0.12, 0.14, 0.22, alpha * 0.6)
                 cr.fill_preserve()
-                cr.set_source_rgba(0.50, 0.47, 0.87, 0.3)
+                cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.3)
                 cr.set_line_width(1.0)
                 cr.stroke()
 
-                # Text
                 font = Pango.FontDescription("Ubuntu, Sans 9")
                 layout.set_font_description(font)
                 layout.set_text(f"📄  {name}", -1)
-                cr.set_source_rgba(0.92, 0.95, 1.0, 0.95)
+                cr.set_source_rgba(0.92, 0.95, 1.0, alpha * 0.95)
                 cr.move_to(px + 28, item_y + 4)
                 PangoCairo.show_layout(cr, layout)
 
                 layout.set_text(size, -1)
                 sw, sh = layout.get_pixel_size()
-                cr.set_source_rgba(0.65, 0.68, 0.80, 0.75)
+                cr.set_source_rgba(0.65, 0.68, 0.80, alpha * 0.75)
                 cr.move_to(px + w - sw - 28, item_y + 4)
                 PangoCairo.show_layout(cr, layout)
                 cr.restore()
-
                 item_y += 30
 
-    def draw_water_tab(self, cr, px, w, h):
+    def draw_water_tab(self, cr, px, w, h, alpha):
         cx = self.BOX_W / 2.0
         layout = PangoCairo.create_layout(cr)
 
@@ -904,13 +922,12 @@ class NusaNotch(Gtk.Window):
         goal = self.settings.get("water_goal", 2000)
         pct = min(100, int((cur / goal) * 100))
 
-        # Big Water Amount Display
         font = Pango.FontDescription("Ubuntu, Sans Bold 20")
         layout.set_font_description(font)
         layout.set_text(f"{cur / 1000.0:.1f} / {goal / 1000.0:.1f} L  ({pct}%)", -1)
         tw, th = layout.get_pixel_size()
 
-        cr.set_source_rgba(0.35, 0.75, 0.98, 1.0)
+        cr.set_source_rgba(0.35, 0.78, 1.0, alpha)
         cr.move_to(cx - tw / 2.0, 95)
         PangoCairo.show_layout(cr, layout)
 
@@ -922,36 +939,35 @@ class NusaNotch(Gtk.Window):
 
         cr.save()
         cr.rectangle(bar_x, bar_y, bar_w, bar_h)
-        cr.set_source_rgba(0.12, 0.15, 0.22, 0.8)
+        cr.set_source_rgba(0.12, 0.15, 0.22, alpha * 0.8)
         cr.fill()
 
         fill_w = bar_w * (pct / 100.0)
         if fill_w > 0:
             cr.rectangle(bar_x, bar_y, fill_w, bar_h)
-            cr.set_source_rgba(0.35, 0.75, 0.98, 0.9)
+            cr.set_source_rgba(0.35, 0.78, 1.0, alpha * 0.9)
             cr.fill()
         cr.restore()
 
-        # Action Buttons (+250ml, +500ml, Reset)
-        btn_y = 165
-        self.draw_rect_btn(cr, cx - 100, btn_y - 14, 65, 28, "+250 ml")
-        self.draw_rect_btn(cr, cx - 30, btn_y - 14, 65, 28, "+500 ml")
-        self.draw_rect_btn(cr, cx + 40, btn_y - 14, 60, 28, "RESET")
+        btn_y = 166
+        self.draw_rect_btn(cr, cx - 105, btn_y - 14, 66, 28, "+250 ml", alpha=alpha)
+        self.draw_rect_btn(cr, cx - 33, btn_y - 14, 66, 28, "+500 ml", alpha=alpha)
+        self.draw_rect_btn(cr, cx + 40, btn_y - 14, 65, 28, "RESET", alpha=alpha)
 
-    # ─── UI Helper Components ───────────────────────────────────────
-    def draw_circle_btn(self, cr, bx, by, r, symbol, highlight=False):
+    # ─── UI Primitives ──────────────────────────────────────────────
+    def draw_circle_btn(self, cr, bx, by, r, symbol, highlight=False, alpha=1.0):
         cr.save()
         cr.arc(bx, by, r, 0, 2 * math.pi)
         if highlight:
-            cr.set_source_rgba(0.50, 0.47, 0.87, 0.9)
+            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.9)
             cr.fill_preserve()
-            cr.set_source_rgba(0.85, 0.82, 1.0, 1.0)
+            cr.set_source_rgba(0.85, 0.82, 1.0, alpha)
             cr.set_line_width(1.8)
             cr.stroke()
         else:
-            cr.set_source_rgba(0.15, 0.17, 0.25, 0.8)
+            cr.set_source_rgba(0.15, 0.17, 0.25, alpha * 0.8)
             cr.fill_preserve()
-            cr.set_source_rgba(0.50, 0.47, 0.87, 0.4)
+            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.4)
             cr.set_line_width(1.2)
             cr.stroke()
 
@@ -961,12 +977,12 @@ class NusaNotch(Gtk.Window):
         layout.set_text(symbol, -1)
         tw, th = layout.get_pixel_size()
 
-        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
         cr.move_to(bx - tw / 2.0, by - th / 2.0)
         PangoCairo.show_layout(cr, layout)
         cr.restore()
 
-    def draw_rect_btn(self, cr, bx, by, bw, bh, text, highlight=False, font_size=9):
+    def draw_rect_btn(self, cr, bx, by, bw, bh, text, highlight=False, font_size=9, alpha=1.0):
         cr.save()
         r = 6.0
         cr.new_sub_path()
@@ -977,15 +993,15 @@ class NusaNotch(Gtk.Window):
         cr.close_path()
 
         if highlight:
-            cr.set_source_rgba(0.50, 0.47, 0.87, 0.9)
+            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.9)
             cr.fill_preserve()
-            cr.set_source_rgba(0.85, 0.82, 1.0, 1.0)
+            cr.set_source_rgba(0.85, 0.82, 1.0, alpha)
             cr.set_line_width(1.5)
             cr.stroke()
         else:
-            cr.set_source_rgba(0.15, 0.17, 0.26, 0.8)
+            cr.set_source_rgba(0.15, 0.17, 0.26, alpha * 0.8)
             cr.fill_preserve()
-            cr.set_source_rgba(0.50, 0.47, 0.87, 0.4)
+            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.4)
             cr.set_line_width(1.0)
             cr.stroke()
 
@@ -995,13 +1011,12 @@ class NusaNotch(Gtk.Window):
         layout.set_text(text, -1)
         tw, th = layout.get_pixel_size()
 
-        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
         cr.move_to(bx + (bw - tw) / 2.0, by + (bh - th) / 2.0)
         PangoCairo.show_layout(cr, layout)
         cr.restore()
 
 def main():
-    # Single instance lock
     lock_file = open('/tmp/nusa-linux.lock', 'w')
     try:
         fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
