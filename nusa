@@ -3,15 +3,17 @@
 Nusa for Linux — A living, interactive notch for Linux desktop.
 Inspired by Nusa (https://rama2555.github.io/nusa/).
 
-Engine v3.2:
-- Singing Companion Mascot: When music plays, the top notch mascot happily sings (eyes ^ ^, bobbing mouth o ↔ O, floating ♪ note).
-- Detachable Floating Music Island: A draggable mini-player capsule that can be placed anywhere on screen and toggled/hidden anytime.
-- Auto App Detection: Spotify, YouTube, VLC, Firefox, or Local Player with real vector branding.
-- Dynamic Animated "Candle Suara" (Audio Equalizer Visualizer): Real-time harmonic audio wave bars.
-- Physical micro-window geometry: 166x30 when idle, strictly bounded to the visible pill (zero early activation).
+Engine v3.3:
+- Ultra-Sleek Music Player:
+  * Crisp geometric Cairo vector controls (no generic Unicode text glyphs).
+  * Interactive Track Scrubber & Progress Bar (with time elapsed / total duration & seek support).
+  * Compact glassmorphic Float Switch pill ([ ● FLOAT ON ]).
+  * Ambient colored glow behind album/source artwork.
+  * 5-bar animated Candle Suara visualizer dancing with the music.
+- Singing Companion Mascot: Joyful singing eyes (^ ^), rhythmic bobbing mouth (o ↔ O), and floating musical note (♪).
+- Detachable Floating Music Island: Draggable anywhere on the desktop, with hide/show toggle.
+- Physical micro-window geometry: 166x30 when idle, strictly bounded to visible pill.
 - Hardware pointer watchdog: Notch closes reliably and instantly when cursor leaves.
-- Hardware-synced VSync (add_tick_callback) with fluid Apple/Nusa spring physics.
-- MPRIS Media Player integration, Pomodoro focus timer, File shelf, and Water tracker.
 """
 
 import gi
@@ -89,6 +91,17 @@ def save_shelf(shelf_items):
     except Exception as e:
         print("[Nusa] Error saving shelf:", e)
 
+def format_duration(seconds):
+    if seconds <= 0:
+        return "00:00"
+    m = seconds // 60
+    s = seconds % 60
+    if m >= 60:
+        h = m // 60
+        m = m % 60
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
 # ─── High Performance Fluid Spring ──────────────────────────────────
 class FluidSpring:
     def __init__(self, stiffness=185.0, damping=14.5):
@@ -157,13 +170,28 @@ class MprisController:
                     artist = ', '.join(artist_raw) if isinstance(artist_raw, list) else str(artist_raw or '')
                     url = meta.get('xesam:url', '')
 
+                    length_raw = meta.get('mpris:length', 0)
+                    length_sec = int(length_raw / 1_000_000) if length_raw else 0
+                    track_id = meta.get('mpris:trackid', '/')
+
+                    pos_sec = 0
+                    try:
+                        pos_v = pp.get_cached_property('Position')
+                        if pos_v:
+                            pos_sec = int(pos_v.unpack() / 1_000_000)
+                    except Exception:
+                        pass
+
                     info = {
                         'name': p,
                         'proxy': pp,
                         'status': status,
                         'title': str(title or 'Unknown Track'),
                         'artist': str(artist or 'Unknown Artist'),
-                        'url': str(url or '')
+                        'url': str(url or ''),
+                        'length': length_sec,
+                        'position': pos_sec,
+                        'track_id': track_id
                     }
                     if status == 'Playing':
                         return info
@@ -195,6 +223,14 @@ class MprisController:
                 player_info['proxy'].Previous()
             except Exception as e:
                 print("[MPRIS] Previous error:", e)
+
+    def set_position(self, player_info, target_seconds):
+        if player_info and player_info.get('proxy'):
+            try:
+                track_id = player_info.get('track_id', '/')
+                player_info['proxy'].SetPosition('(ox)', track_id, int(target_seconds * 1_000_000))
+            except Exception as e:
+                print("[MPRIS] SetPosition error:", e)
 
 # ─── Floating Detachable Music Island ────────────────────────────────
 class FloatingMusicIsland(Gtk.Window):
@@ -245,10 +281,11 @@ class FloatingMusicIsland(Gtk.Window):
             self.main_notch.settings["floating_player_enabled"] = False
             save_settings(self.main_notch.settings)
             self.hide()
+            self.main_notch.queue_draw()
             return True
 
-        # 2. Play / Pause Button (Around X=268, Y=27, r=14)
-        if 254 <= x <= 282 and 13 <= y <= 41:
+        # 2. Play / Pause Button (Around X=266, Y=27, r=14)
+        if 250 <= x <= 280 and 13 <= y <= 41:
             self.main_notch.mpris.play_pause(self.main_notch.active_player)
             return True
 
@@ -265,7 +302,6 @@ class FloatingMusicIsland(Gtk.Window):
         return True
 
     def on_button_release(self, widget, event):
-        # Save position to settings
         pos = self.get_position()
         self.main_notch.settings["floating_player_pos"] = [pos[0], pos[1]]
         save_settings(self.main_notch.settings)
@@ -351,19 +387,18 @@ class FloatingMusicIsland(Gtk.Window):
         cr.move_to(52, 29)
         PangoCairo.show_layout(cr, layout)
 
-        # 4. Animated Candle Suara (Visualizer) at X=232, Y=27
+        # 4. Animated Candle Suara (Visualizer) at X=230, Y=27
         self.main_notch.draw_visualizer_bars(
-            cr, cx=232, cy=27, num_bars=5,
+            cr, cx=230, cy=27, num_bars=5,
             is_playing=is_playing, color=scolor,
-            max_h=20.0, bar_w=2.8, bar_gap=2.2, alpha=1.0
+            max_h=20.0, bar_w=2.6, bar_gap=2.2, alpha=1.0
         )
 
-        # 5. Play / Pause Button at X=268, Y=27
-        symbol = "⏸" if is_playing else "▶"
-        self.main_notch.draw_circle_btn(cr, bx=268, by=27, r=13, symbol=symbol, highlight=True, alpha=1.0)
+        # 5. Crisp Vector Play / Pause Button at X=266, Y=27 (r=13)
+        self.main_notch.draw_vector_play_pause(cr, cx=266, cy=27, r=13, is_playing=is_playing, alpha=1.0)
 
-        # 6. Next Button at X=296, Y=27
-        self.main_notch.draw_circle_btn(cr, bx=296, by=27, r=11, symbol="⏭", alpha=1.0)
+        # 6. Crisp Vector Next Button at X=296, Y=27 (r=11)
+        self.main_notch.draw_vector_next(cr, cx=296, cy=27, r=11, alpha=1.0)
 
         # 7. Close / Hide Button at X=324, Y=14
         cr.save()
@@ -733,7 +768,7 @@ class NusaNotch(Gtk.Window):
         cr.new_path()
 
         if source_type == 'youtube':
-            w, h, r = size * 0.68, size * 0.48, size * 0.15
+            w, h, r = size * 0.65, size * 0.46, size * 0.14
             cr.new_sub_path()
             cr.arc(w/2 - r, -h/2 + r, r, -math.pi/2, 0)
             cr.arc(w/2 - r, h/2 - r, r, 0, math.pi/2)
@@ -808,7 +843,7 @@ class NusaNotch(Gtk.Window):
 
         cr.restore()
 
-    def draw_visualizer_bars(self, cr, cx, cy, num_bars, is_playing, color, max_h=26.0, bar_w=3.5, bar_gap=3.0, alpha=1.0):
+    def draw_visualizer_bars(self, cr, cx, cy, num_bars, is_playing, color, max_h=24.0, bar_w=3.2, bar_gap=2.5, alpha=1.0):
         cr.save()
         cr.translate(cx, cy)
         total_w = num_bars * bar_w + (num_bars - 1) * bar_gap
@@ -835,6 +870,97 @@ class NusaNotch(Gtk.Window):
             cr.set_source_rgba(color[0], color[1], color[2], alpha * 0.95)
             cr.fill()
 
+        cr.restore()
+
+    # ─── Geometric Cairo Vector Playback Controls ───────────────────
+    def draw_vector_play_pause(self, cr, cx, cy, r, is_playing, alpha=1.0):
+        cr.save()
+        # Circular glowing button background
+        cr.new_path()
+        cr.arc(cx, cy, r, 0, 2 * math.pi)
+        grad = cairo.LinearGradient(cx - r, cy - r, cx + r, cy + r)
+        grad.add_color_stop_rgba(0, 0.62, 0.52, 0.98, alpha)
+        grad.add_color_stop_rgba(1, 0.46, 0.36, 0.88, alpha)
+        cr.set_source(grad)
+        cr.fill_preserve()
+        cr.set_source_rgba(0.85, 0.82, 1.0, alpha * 0.7)
+        cr.set_line_width(1.8)
+        cr.stroke()
+
+        # Vector Icon
+        cr.translate(cx, cy)
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
+
+        if is_playing:
+            # Two rounded vertical pause bars
+            pw, ph, pr = r * 0.17, r * 0.62, r * 0.085
+            spacing = r * 0.36
+            for bx in [-spacing / 2.0 - pw / 2.0, spacing / 2.0 - pw / 2.0]:
+                cr.new_sub_path()
+                cr.arc(bx + pr, -ph / 2.0 + pr, pr, math.pi, 0)
+                cr.arc(bx + pr, ph / 2.0 - pr, pr, 0, math.pi)
+                cr.close_path()
+                cr.fill()
+        else:
+            # Equilateral play triangle pointing right
+            tw = r * 0.45
+            cr.new_path()
+            cr.move_to(-tw * 0.5 + 1.2, -tw * 0.75)
+            cr.line_to(tw + 1.2, 0)
+            cr.line_to(-tw * 0.5 + 1.2, tw * 0.75)
+            cr.close_path()
+            cr.fill()
+
+        cr.restore()
+
+    def draw_vector_prev(self, cr, cx, cy, r, alpha=1.0):
+        cr.save()
+        cr.new_path()
+        cr.arc(cx, cy, r, 0, 2 * math.pi)
+        cr.set_source_rgba(0.14, 0.17, 0.26, alpha * 0.85)
+        cr.fill_preserve()
+        cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.35)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        cr.translate(cx, cy)
+        cr.set_source_rgba(0.92, 0.95, 1.0, alpha * 0.95)
+        # Vertical stop bar
+        cr.rectangle(-r * 0.45, -r * 0.35, 2.0, r * 0.70)
+        cr.fill()
+        # Triangle pointing left
+        tw = r * 0.35
+        cr.new_path()
+        cr.move_to(tw * 0.9, -tw)
+        cr.line_to(-tw * 0.7, 0)
+        cr.line_to(tw * 0.9, tw)
+        cr.close_path()
+        cr.fill()
+        cr.restore()
+
+    def draw_vector_next(self, cr, cx, cy, r, alpha=1.0):
+        cr.save()
+        cr.new_path()
+        cr.arc(cx, cy, r, 0, 2 * math.pi)
+        cr.set_source_rgba(0.14, 0.17, 0.26, alpha * 0.85)
+        cr.fill_preserve()
+        cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.35)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        cr.translate(cx, cy)
+        cr.set_source_rgba(0.92, 0.95, 1.0, alpha * 0.95)
+        # Triangle pointing right
+        tw = r * 0.35
+        cr.new_path()
+        cr.move_to(-tw * 0.9, -tw)
+        cr.line_to(tw * 0.7, 0)
+        cr.line_to(-tw * 0.9, tw)
+        cr.close_path()
+        cr.fill()
+        # Vertical stop bar
+        cr.rectangle(tw * 0.7 + 1.0, -r * 0.35, 2.0, r * 0.70)
+        cr.fill()
         cr.restore()
 
     # ─── Content Click Interactions ─────────────────────────────────
@@ -865,9 +991,10 @@ class NusaNotch(Gtk.Window):
 
         # 2. Content Interactions
         if self.active_tab == 0: # Music
-            # Toggle Floating Player button at Y=145
             cx = self.EXP_W / 2.0
-            if 138 <= y <= 160 and cx - 110 <= x <= cx + 110:
+
+            # 2a. Floating Mini Player Toggle Switch (Top-Right): X: cur_w - 110 .. cur_w - 15, Y: 78 .. 106
+            if px + cur_w - 110 <= x <= px + cur_w - 15 and 78 <= y <= 106:
                 is_on = not self.settings.get("floating_player_enabled", True)
                 self.settings["floating_player_enabled"] = is_on
                 save_settings(self.settings)
@@ -878,16 +1005,31 @@ class NusaNotch(Gtk.Window):
                 self.queue_draw()
                 return True
 
-            # Playback controls at Y=188
-            btn_y = 188
-            if btn_y - 20 <= y <= btn_y + 20:
-                if cx - 65 <= x <= cx - 25:
+            # 2b. Scrubber Seek: Y: 133 .. 153, X: px + 24 .. px + cur_w - 24
+            bar_x = px + 24
+            bar_w = cur_w - 48
+            if 133 <= y <= 153 and bar_x <= x <= bar_x + bar_w:
+                if self.active_player and self.active_player.get('length', 0) > 0:
+                    pct = max(0.0, min(1.0, (x - bar_x) / bar_w))
+                    target_sec = int(pct * self.active_player['length'])
+                    self.mpris.set_position(self.active_player, target_sec)
+                    self.active_player['position'] = target_sec
+                    self.queue_draw()
+                return True
+
+            # 2c. Playback Controls at Y=184
+            btn_cy = 184
+            if btn_cy - 24 <= y <= btn_cy + 24:
+                # Prev Button (cx - 56, r=17)
+                if cx - 74 <= x <= cx - 38:
                     self.mpris.previous(self.active_player)
                     return True
-                elif cx - 24 <= x <= cx + 24:
+                # Play/Pause Button (cx, r=22)
+                elif cx - 25 <= x <= cx + 25:
                     self.mpris.play_pause(self.active_player)
                     return True
-                elif cx + 25 <= x <= cx + 65:
+                # Next Button (cx + 56, r=17)
+                elif cx + 38 <= x <= cx + 74:
                     self.mpris.next(self.active_player)
                     return True
 
@@ -1243,12 +1385,23 @@ class NusaNotch(Gtk.Window):
             is_playing = (status == 'Playing')
             source = self.detect_source(self.active_player)
             scolor = source['color']
+            length = self.active_player.get('length', 0)
+            pos = self.active_player.get('position', 0)
 
-            # 1. Left: 46x46 Album / App Glass Card
+            # 1. Ambient soft glow behind album artwork
+            glow_cx, glow_cy = px + 48, 108
+            glow = cairo.RadialGradient(glow_cx, glow_cy, 6, glow_cx, glow_cy, 52)
+            glow.add_color_stop_rgba(0, scolor[0], scolor[1], scolor[2], alpha * 0.24)
+            glow.add_color_stop_rgba(1, scolor[0], scolor[1], scolor[2], 0.0)
+            cr.set_source(glow)
+            cr.arc(glow_cx, glow_cy, 52, 0, 2 * math.pi)
+            cr.fill()
+
+            # 2. 48x48 Album / App Glass Card at X = px + 24, Y = 84
             card_x = px + 24
-            card_y = 86
-            card_s = 46
-            card_r = 12
+            card_y = 84
+            card_s = 48
+            card_r = 13
 
             cr.save()
             cr.new_path()
@@ -1259,28 +1412,70 @@ class NusaNotch(Gtk.Window):
             cr.arc(card_x + card_r, card_y + card_r, card_r, math.pi, 3*math.pi/2)
             cr.close_path()
 
-            cr.set_source_rgba(0.10, 0.12, 0.18, alpha * 0.92)
+            cr.set_source_rgba(0.12, 0.14, 0.22, alpha * 0.94)
             cr.fill_preserve()
-            cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.45)
-            cr.set_line_width(1.3)
+            cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.50)
+            cr.set_line_width(1.2)
             cr.stroke()
 
             # Draw Logo inside card
             self.draw_source_logo(cr, card_x + card_s / 2.0, card_y + card_s / 2.0, card_s, source['type'])
             cr.restore()
 
-            # 2. Middle: Text Info
-            text_x = px + 80
+            # 3. Middle: Text Info
+            text_x = px + 82
 
             # Source badge
             font = Pango.FontDescription("Ubuntu, Sans Bold 8")
             layout.set_font_description(font)
             layout.set_text(f"● {source['label']}", -1)
             cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.95)
-            cr.move_to(text_x, 86)
+            cr.move_to(text_x, 84)
             PangoCairo.show_layout(cr, layout)
 
-            # Title
+            # Compact Glassmorphic Float Switch Pill at Top-Right
+            is_float_on = self.settings.get("floating_player_enabled", True)
+            sw_w, sw_h, sw_r = 76.0, 20.0, 10.0
+            sw_x = px + w - sw_w - 24
+            sw_y = 83.0
+
+            cr.save()
+            cr.new_path()
+            cr.new_sub_path()
+            cr.arc(sw_x + sw_w - sw_r, sw_y + sw_r, sw_r, -math.pi/2, math.pi/2)
+            cr.arc(sw_x + sw_r, sw_y + sw_r, sw_r, math.pi/2, 3*math.pi/2)
+            cr.close_path()
+            if is_float_on:
+                cr.set_source_rgba(0.16, 0.19, 0.30, alpha * 0.88)
+                cr.fill_preserve()
+                cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.65)
+                cr.set_line_width(1.0)
+                cr.stroke()
+                # Active Green Dot
+                cr.arc(sw_x + 9, sw_y + 10, 2.8, 0, 2 * math.pi)
+                cr.set_source_rgba(0.2, 0.9, 0.4, alpha * 0.95)
+                cr.fill()
+                float_txt = "FLOAT ON"
+            else:
+                cr.set_source_rgba(0.12, 0.14, 0.20, alpha * 0.70)
+                cr.fill_preserve()
+                cr.set_source_rgba(0.40, 0.44, 0.55, alpha * 0.40)
+                cr.set_line_width(1.0)
+                cr.stroke()
+                # Muted Dot
+                cr.arc(sw_x + 9, sw_y + 10, 2.8, 0, 2 * math.pi)
+                cr.set_source_rgba(0.55, 0.60, 0.70, alpha * 0.70)
+                cr.fill()
+                float_txt = "FLOAT OFF"
+
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 7.5"))
+            layout.set_text(float_txt, -1)
+            cr.set_source_rgba(0.92, 0.95, 1.0, alpha * 0.95 if is_float_on else alpha * 0.65)
+            cr.move_to(sw_x + 16, sw_y + 4.5)
+            PangoCairo.show_layout(cr, layout)
+            cr.restore()
+
+            # Track Title
             if len(title) > 28:
                 display_title = title[:26] + ".."
             else:
@@ -1288,8 +1483,8 @@ class NusaNotch(Gtk.Window):
             font = Pango.FontDescription("Ubuntu, Sans Bold 11.5")
             layout.set_font_description(font)
             layout.set_text(display_title, -1)
-            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
-            cr.move_to(text_x, 99)
+            cr.set_source_rgba(0.96, 0.98, 1.0, alpha)
+            cr.move_to(text_x, 98)
             PangoCairo.show_layout(cr, layout)
 
             # Artist
@@ -1304,22 +1499,87 @@ class NusaNotch(Gtk.Window):
             cr.move_to(text_x, 116)
             PangoCairo.show_layout(cr, layout)
 
-            # 3. Right: Candle Suara (Audio Visualizer)
-            viz_x = px + w - 38
-            viz_y = 108
-            self.draw_visualizer_bars(cr, viz_x, viz_y, num_bars=5, is_playing=is_playing, color=scolor, max_h=24.0, bar_w=3.5, bar_gap=3.0, alpha=alpha)
+            # 4. Sleek Interactive Progress Bar (Scrubber) at Y = 143
+            bar_x = px + 24
+            bar_y = 143
+            bar_w = w - 48
+            bar_h = 3.5
+            pct = max(0.0, min(1.0, pos / length)) if length > 0 else 0.0
 
-            # 4. Toggle Floating Mini Player Button at Y=145
-            is_island_on = self.settings.get("floating_player_enabled", True)
-            island_label = "⎘ MINI PLAYER: AKTIF" if is_island_on else "⎘ MINI PLAYER: SEMBUNYI"
-            self.draw_rect_btn(cr, cx - 85, 140, 170, 22, island_label, highlight=is_island_on, font_size=8, alpha=alpha)
+            # Elapsed and Total Time Labels
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Monospace Bold 8"))
+            layout.set_text(format_duration(pos), -1)
+            cr.set_source_rgba(0.65, 0.70, 0.82, alpha * 0.85)
+            cr.move_to(bar_x, bar_y - 12)
+            PangoCairo.show_layout(cr, layout)
 
-            # 5. Bottom Controls at Y=184
-            btn_y = 184
-            self.draw_circle_btn(cr, cx - 44, btn_y, 15, "⏮", alpha=alpha)
-            symbol = "⏸" if is_playing else "▶"
-            self.draw_circle_btn(cr, cx, btn_y, 18, symbol, highlight=True, alpha=alpha)
-            self.draw_circle_btn(cr, cx + 44, btn_y, 15, "⏭", alpha=alpha)
+            layout.set_text(format_duration(length), -1)
+            ptw, pth = layout.get_pixel_size()
+            cr.move_to(bar_x + bar_w - ptw, bar_y - 12)
+            PangoCairo.show_layout(cr, layout)
+
+            # Progress Background Track
+            cr.save()
+            cr.new_sub_path()
+            br = 1.75
+            cr.arc(bar_x + bar_w - br, bar_y + br, br, -math.pi/2, math.pi/2)
+            cr.arc(bar_x + br, bar_y + br, br, math.pi/2, 3*math.pi/2)
+            cr.close_path()
+            cr.set_source_rgba(0.18, 0.22, 0.32, alpha * 0.75)
+            cr.fill()
+
+            # Active Progress Track
+            if pct > 0.005:
+                active_w = max(4.0, bar_w * pct)
+                cr.new_sub_path()
+                cr.arc(bar_x + active_w - br, bar_y + br, br, -math.pi/2, math.pi/2)
+                cr.arc(bar_x + br, bar_y + br, br, math.pi/2, 3*math.pi/2)
+                cr.close_path()
+                grad_bar = cairo.LinearGradient(bar_x, 0, bar_x + active_w, 0)
+                grad_bar.add_color_stop_rgba(0, 0.55, 0.50, 0.95, alpha * 0.9)
+                grad_bar.add_color_stop_rgba(1, 0.85, 0.55, 0.95, alpha * 1.0)
+                cr.set_source(grad_bar)
+                cr.fill()
+
+                # Glowing Thumb Knob
+                cr.arc(bar_x + active_w, bar_y + br, 4.0, 0, 2 * math.pi)
+                cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
+                cr.fill_preserve()
+                cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.8)
+                cr.set_line_width(1.3)
+                cr.stroke()
+            cr.restore()
+
+            # 5. Playback Controls at Y = 184
+            btn_cy = 184
+
+            # Far Left: Subtle Volume Icon
+            cr.save()
+            cr.translate(px + 38, btn_cy)
+            cr.set_source_rgba(0.60, 0.65, 0.78, alpha * 0.80)
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 10"))
+            layout.set_text("🔊", -1)
+            sw, sh = layout.get_pixel_size()
+            cr.move_to(-sw / 2.0, -sh / 2.0)
+            PangoCairo.show_layout(cr, layout)
+            cr.restore()
+
+            # Crisp Vector Prev Button at cx - 56
+            self.draw_vector_prev(cr, cx=cx - 56, cy=btn_cy, r=17, alpha=alpha)
+
+            # Center Glowing Vector Play/Pause Button at cx (r=22)
+            self.draw_vector_play_pause(cr, cx=cx, cy=btn_cy, r=22, is_playing=is_playing, alpha=alpha)
+
+            # Crisp Vector Next Button at cx + 56
+            self.draw_vector_next(cr, cx=cx + 56, cy=btn_cy, r=17, alpha=alpha)
+
+            # Far Right: 5-bar Animated Candle Suara
+            viz_cx = px + w - 38
+            self.draw_visualizer_bars(
+                cr, cx=viz_cx, cy=btn_cy, num_bars=5,
+                is_playing=is_playing, color=scolor,
+                max_h=24.0, bar_w=3.2, bar_gap=2.5, alpha=alpha
+            )
 
         else:
             font = Pango.FontDescription("Ubuntu, Sans 11")
@@ -1447,34 +1707,6 @@ class NusaNotch(Gtk.Window):
         self.draw_rect_btn(cr, cx + 40, btn_y - 14, 65, 28, "RESET", alpha=alpha)
 
     # ─── UI Primitives ──────────────────────────────────────────────
-    def draw_circle_btn(self, cr, bx, by, r, symbol, highlight=False, alpha=1.0):
-        cr.save()
-        cr.new_path()
-        cr.arc(bx, by, r, 0, 2 * math.pi)
-        if highlight:
-            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.9)
-            cr.fill_preserve()
-            cr.set_source_rgba(0.85, 0.82, 1.0, alpha)
-            cr.set_line_width(1.8)
-            cr.stroke()
-        else:
-            cr.set_source_rgba(0.15, 0.17, 0.25, alpha * 0.8)
-            cr.fill_preserve()
-            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.4)
-            cr.set_line_width(1.2)
-            cr.stroke()
-
-        layout = PangoCairo.create_layout(cr)
-        font = Pango.FontDescription(f"Ubuntu, Sans Bold {int(r * 0.7)}")
-        layout.set_font_description(font)
-        layout.set_text(symbol, -1)
-        tw, th = layout.get_pixel_size()
-
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
-        cr.move_to(bx - tw / 2.0, by - th / 2.0)
-        PangoCairo.show_layout(cr, layout)
-        cr.restore()
-
     def draw_rect_btn(self, cr, bx, by, bw, bh, text, highlight=False, font_size=9, alpha=1.0):
         cr.save()
         r = 6.0
