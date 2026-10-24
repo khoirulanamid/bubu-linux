@@ -1,0 +1,1016 @@
+#!/usr/bin/python3
+"""
+Nusa for Linux — A living, interactive notch for Linux desktop.
+Inspired by Nusa (https://rama2555.github.io/nusa/).
+
+Features:
+- Living companion mascot with blinking, sleepy, and happy eye expressions.
+- Fluid spring physics expansion on hover / drag-and-drop.
+- MPRIS Media Player controller (Spotify, YouTube, Chrome, Firefox, VLC).
+- Pomodoro Focus Timer with desktop notifications.
+- File Shelf: drag files to stash, 1-click open, or clear.
+- Daily Water hydration tracker.
+- Lightweight native GTK3 + Cairo (low CPU, ~30MB RAM).
+"""
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('Pango', '1.0')
+gi.require_version('PangoCairo', '1.0')
+gi.require_version('Gio', '2.0')
+from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo, Gio
+
+import cairo
+import math
+import time
+import os
+import sys
+import json
+import urllib.parse
+import subprocess
+import fcntl
+
+# Configuration & Data paths
+CONFIG_DIR = os.path.expanduser("~/.config/nusa")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
+SHELF_FILE = os.path.join(CONFIG_DIR, "shelf.json")
+
+os.makedirs(CONFIG_DIR, exist_ok=True)
+
+DEFAULT_SETTINGS = {
+    "mascot_enabled": True,
+    "pomodoro_duration": 25 * 60,
+    "water_goal": 2000,
+    "water_current": 500,
+    "water_date": time.strftime("%Y-%m-%d"),
+    "theme_accent": [0.50, 0.47, 0.87], # Nusa Soft Violet
+    "start_with_system": True
+}
+
+def load_settings():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                data = json.load(f)
+                s = dict(DEFAULT_SETTINGS)
+                s.update(data)
+                # Reset water tracker if new day
+                today = time.strftime("%Y-%m-%d")
+                if s.get("water_date") != today:
+                    s["water_date"] = today
+                    s["water_current"] = 0
+                return s
+        except Exception:
+            pass
+    return dict(DEFAULT_SETTINGS)
+
+def save_settings(settings):
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        print("[Nusa] Error saving settings:", e)
+
+def load_shelf():
+    if os.path.exists(SHELF_FILE):
+        try:
+            with open(SHELF_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_shelf(shelf_items):
+    try:
+        with open(SHELF_FILE, 'w') as f:
+            json.dump(shelf_items, f, indent=2)
+    except Exception as e:
+        print("[Nusa] Error saving shelf:", e)
+
+# ─── Spring Physics Model ───────────────────────────────────────────
+class Spring:
+    def __init__(self, val, stiffness=230.0, damping=22.0):
+        self.val = float(val)
+        self.target = float(val)
+        self.vel = 0.0
+        self.stiffness = stiffness
+        self.damping = damping
+
+    def set_target(self, target):
+        self.target = float(target)
+
+    def snap_to(self, val):
+        self.val = float(val)
+        self.target = float(val)
+        self.vel = 0.0
+
+    def update(self, dt):
+        force = (self.target - self.val) * self.stiffness
+        damping_force = self.vel * self.damping
+        acc = force - damping_force
+        self.vel += acc * dt
+        self.val += self.vel * dt
+        settled = (abs(self.target - self.val) < 0.2 and abs(self.vel) < 0.2)
+        if settled:
+            self.val = self.target
+            self.vel = 0.0
+        return settled
+
+# ─── MPRIS Media Controller ─────────────────────────────────────────
+class MprisController:
+    def __init__(self):
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except Exception:
+            self.bus = None
+
+    def get_active_player(self):
+        if not self.bus:
+            return None
+        try:
+            proxy = Gio.DBusProxy.new_sync(
+                self.bus, Gio.DBusProxyFlags.NONE, None,
+                'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                'org.freedesktop.DBus', None
+            )
+            names = proxy.ListNames()
+            players = [n for n in names if n.startswith('org.mpris.MediaPlayer2.')]
+            if not players:
+                return None
+
+            # Prioritize playing player, then first available
+            best_player = None
+            for p in players:
+                try:
+                    pp = Gio.DBusProxy.new_sync(
+                        self.bus, Gio.DBusProxyFlags.NONE, None,
+                        p, '/org/mpris/MediaPlayer2',
+                        'org.mpris.MediaPlayer2.Player', None
+                    )
+                    status_v = pp.get_cached_property('PlaybackStatus')
+                    status = status_v.unpack() if status_v else 'Stopped'
+                    meta_v = pp.get_cached_property('Metadata')
+                    meta = meta_v.unpack() if meta_v else {}
+                    title = meta.get('xesam:title', '')
+                    artist_raw = meta.get('xesam:artist', [])
+                    artist = ', '.join(artist_raw) if isinstance(artist_raw, list) else str(artist_raw or '')
+
+                    info = {
+                        'name': p,
+                        'proxy': pp,
+                        'status': status,
+                        'title': str(title or 'Unknown Track'),
+                        'artist': str(artist or 'Unknown Artist')
+                    }
+                    if status == 'Playing':
+                        return info
+                    if best_player is None and title:
+                        best_player = info
+                except Exception:
+                    continue
+            return best_player
+        except Exception:
+            return None
+
+    def play_pause(self, player_info):
+        if player_info and player_info.get('proxy'):
+            try:
+                player_info['proxy'].PlayPause()
+            except Exception as e:
+                print("[MPRIS] PlayPause error:", e)
+
+    def next(self, player_info):
+        if player_info and player_info.get('proxy'):
+            try:
+                player_info['proxy'].Next()
+            except Exception as e:
+                print("[MPRIS] Next error:", e)
+
+    def previous(self, player_info):
+        if player_info and player_info.get('proxy'):
+            try:
+                player_info['proxy'].Previous()
+            except Exception as e:
+                print("[MPRIS] Previous error:", e)
+
+# ─── Main Nusa Window ───────────────────────────────────────────────
+class NusaNotch(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_name("nusa-living-notch")
+        self.set_title("Nusa")
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.stick()
+
+        # Canvas Bounding Box
+        self.BOX_W = 480
+        self.BOX_H = 260
+        self.set_default_size(self.BOX_W, self.BOX_H)
+
+        # Idle and Expanded dimensions
+        self.IDLE_W = 180.0
+        self.IDLE_H = 32.0
+        self.EXP_W = 440.0
+        self.EXP_H = 220.0
+
+        # State Springs
+        self.width_spring = Spring(self.IDLE_W, stiffness=240.0, damping=22.0)
+        self.height_spring = Spring(self.IDLE_H, stiffness=240.0, damping=22.0)
+        self.is_expanded = False
+        self.is_animating = False
+
+        # Mascot State
+        # AWAKE, BLINK, HAPPY, SLEEPY
+        self.mascot_state = "AWAKE"
+        self.last_hover_time = time.time()
+        self.next_blink_time = time.time() + 4.0
+        self.sleepy_z_offset = 0.0
+
+        # Active Tab: 0: Music, 1: Focus (Pomodoro), 2: Shelf, 3: Water
+        self.active_tab = 0
+        self.tabs = ["Music", "Focus", "Shelf", "Water"]
+
+        # Data & Controllers
+        self.settings = load_settings()
+        self.shelf_items = load_shelf()
+        self.mpris = MprisController()
+        self.active_player = None
+
+        # Pomodoro variables
+        self.pomo_running = False
+        self.pomo_time_left = self.settings.get("pomodoro_duration", 25 * 60)
+        self.pomo_total = self.pomo_time_left
+
+        # Drag & drop state
+        self.drag_hover = False
+        self.retract_timer = None
+
+        # RGBA Transparency
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+        # Event connections
+        self.connect("draw", self.on_draw)
+        self.connect("realize", self.on_realize)
+        self.add_events(
+            Gdk.EventMask.ENTER_NOTIFY_MASK |
+            Gdk.EventMask.LEAVE_NOTIFY_MASK |
+            Gdk.EventMask.POINTER_MOTION_MASK |
+            Gdk.EventMask.BUTTON_PRESS_MASK
+        )
+        self.connect("enter-notify-event", self.on_enter)
+        self.connect("leave-notify-event", self.on_leave)
+        self.connect("button-press-event", self.on_button_press)
+
+        # Drag and drop destination
+        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        self.drag_dest_add_uri_targets()
+        self.connect("drag-motion", self.on_drag_motion)
+        self.connect("drag-leave", self.on_drag_leave)
+        self.connect("drag-data-received", self.on_drag_drop)
+
+        # Timers
+        GLib.timeout_add(1000, self.on_second_tick)
+        GLib.timeout_add(80, self.on_mascot_tick)
+
+        self.reposition()
+        self.show_all()
+
+    def get_monitor_geometry(self):
+        display = Gdk.Display.get_default()
+        monitor = display.get_primary_monitor()
+        if not monitor:
+            monitor = display.get_monitor(0)
+        return monitor.get_geometry()
+
+    def reposition(self):
+        geom = self.get_monitor_geometry()
+        x = geom.x + (geom.width - self.BOX_W) // 2
+        y = geom.y
+        self.move(x, y)
+
+    def on_realize(self, widget):
+        self.update_input_shape()
+
+    def update_input_shape(self):
+        gdk_win = self.get_window()
+        if not gdk_win:
+            return
+        if self.is_expanded or self.is_animating:
+            # Let full card receive mouse clicks
+            gdk_win.input_shape_combine_region(None, 0, 0)
+        else:
+            # Mask to idle pill only
+            cur_w = int(self.width_spring.val)
+            cur_h = int(self.height_spring.val)
+            px = (self.BOX_W - cur_w) // 2
+            rect = cairo.RectangleInt(px, 0, cur_w, cur_h)
+            region = cairo.Region(rect)
+            gdk_win.input_shape_combine_region(region, 0, 0)
+
+    # ─── Animation Loop (60 FPS) ────────────────────────────────────
+    def start_animation(self):
+        if not self.is_animating:
+            self.is_animating = True
+            self.update_input_shape()
+            GLib.timeout_add(16, self.on_anim_step)
+
+    def on_anim_step(self):
+        dt = 0.016
+        settled_w = self.width_spring.update(dt)
+        settled_h = self.height_spring.update(dt)
+
+        self.queue_draw()
+
+        if settled_w and settled_h:
+            self.is_animating = False
+            self.update_input_shape()
+            return False
+        return True
+
+    def expand(self):
+        self.cancel_retract()
+        self.is_expanded = True
+        self.mascot_state = "HAPPY"
+        self.width_spring.set_target(self.EXP_W)
+        self.height_spring.set_target(self.EXP_H)
+        self.start_animation()
+
+    def retract(self):
+        self.is_expanded = False
+        self.drag_hover = False
+        self.mascot_state = "AWAKE"
+        self.width_spring.set_target(self.IDLE_W)
+        self.height_spring.set_target(self.IDLE_H)
+        self.start_animation()
+
+    def cancel_retract(self):
+        if self.retract_timer:
+            GLib.source_remove(self.retract_timer)
+            self.retract_timer = None
+
+    # ─── Events ─────────────────────────────────────────────────────
+    def on_enter(self, widget, event):
+        self.last_hover_time = time.time()
+        self.expand()
+
+    def on_leave(self, widget, event):
+        self.last_hover_time = time.time()
+        self.cancel_retract()
+        # Debounce retraction slightly
+        self.retract_timer = GLib.timeout_add(450, self._do_retract)
+
+    def _do_retract(self):
+        self.retract()
+        self.retract_timer = None
+        return False
+
+    def on_drag_motion(self, widget, context, x, y, time_val):
+        self.cancel_retract()
+        if not self.is_expanded:
+            self.drag_hover = True
+            self.active_tab = 2 # Automatically switch to File Shelf
+            self.expand()
+        Gdk.drag_status(context, Gdk.DragAction.COPY, time_val)
+        return True
+
+    def on_drag_leave(self, widget, context, time_val):
+        if self.drag_hover:
+            self.cancel_retract()
+            self.retract_timer = GLib.timeout_add(450, self._do_retract)
+
+    def on_drag_drop(self, widget, context, x, y, data, info, time_val):
+        uris = data.get_uris()
+        context.finish(True, False, time_val)
+        if uris:
+            for u in uris:
+                if u.startswith("file://"):
+                    p = urllib.parse.unquote(urllib.parse.urlparse(u).path)
+                    if os.path.exists(p):
+                        # Add to shelf if not present
+                        if not any(item['path'] == p for item in self.shelf_items):
+                            name = os.path.basename(p)
+                            size_str = self.format_size(os.path.getsize(p)) if not os.path.isdir(p) else "Folder"
+                            self.shelf_items.append({
+                                "name": name,
+                                "path": p,
+                                "size": size_str,
+                                "is_dir": os.path.isdir(p)
+                            })
+            save_shelf(self.shelf_items)
+            self.active_tab = 2 # Show shelf
+            self.queue_draw()
+            subprocess.Popen(
+                ["notify-send", "-a", "Nusa", "Nusa File Shelf", f"Menyimpan {len(uris)} file ke shelf."],
+                env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority"))
+            )
+
+    def format_size(self, size_bytes):
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+    # ─── Periodic Ticks ─────────────────────────────────────────────
+    def on_second_tick(self):
+        # Update media player info
+        self.active_player = self.mpris.get_active_player()
+
+        # Update Pomodoro
+        if self.pomo_running and self.pomo_time_left > 0:
+            self.pomo_time_left -= 1
+            if self.pomo_time_left == 0:
+                self.pomo_running = False
+                subprocess.Popen(
+                    ["notify-send", "-a", "Nusa", "Nusa Focus Time", "Waktu fokus selesai! Istirahat sejenak ☕"],
+                    env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority"))
+                )
+
+        # Mascot sleep logic: if idle for > 25 seconds
+        now = time.time()
+        if not self.is_expanded and (now - self.last_hover_time > 25.0):
+            self.mascot_state = "SLEEPY"
+        elif not self.is_expanded and self.mascot_state == "SLEEPY":
+            self.mascot_state = "AWAKE"
+
+        self.queue_draw()
+        return True
+
+    def on_mascot_tick(self):
+        now = time.time()
+        if self.mascot_state == "AWAKE":
+            if now >= self.next_blink_time:
+                self.mascot_state = "BLINK"
+                GLib.timeout_add(180, self._end_blink)
+                self.next_blink_time = now + 3.5 + (hash(str(now)) % 30) / 10.0
+                self.queue_draw()
+        elif self.mascot_state == "SLEEPY":
+            # Floating zZ animation
+            self.sleepy_z_offset = (self.sleepy_z_offset + 0.08) % 6.0
+            self.queue_draw()
+        return True
+
+    def _end_blink(self):
+        if self.mascot_state == "BLINK":
+            self.mascot_state = "AWAKE"
+            self.queue_draw()
+        return False
+
+    # ─── Button Clicks in Expanded State ─────────────────────────────
+    def on_button_press(self, widget, event):
+        if not self.is_expanded:
+            self.expand()
+            return True
+
+        x, y = event.x, event.y
+        cur_w = self.width_spring.val
+        cur_h = self.height_spring.val
+        px = (self.BOX_W - cur_w) // 2
+
+        # 1. Tab Bar Navigation (Y: ~42 to ~70)
+        if 42 <= y <= 72:
+            tab_w = (cur_w - 40) / len(self.tabs)
+            for i in range(len(self.tabs)):
+                tx = px + 20 + i * tab_w
+                if tx <= x <= tx + tab_w:
+                    self.active_tab = i
+                    self.queue_draw()
+                    return True
+
+        # 2. Content Area Interactions (Y: > 80)
+        if self.active_tab == 0:
+            # Music Player Controls
+            btn_y = 155
+            # Prev, Play/Pause, Next
+            cx = self.BOX_W // 2
+            if btn_y - 20 <= y <= btn_y + 20:
+                if cx - 60 <= x <= cx - 20: # Prev
+                    self.mpris.previous(self.active_player)
+                    return True
+                elif cx - 20 <= x <= cx + 20: # Play/Pause
+                    self.mpris.play_pause(self.active_player)
+                    return True
+                elif cx + 20 <= x <= cx + 60: # Next
+                    self.mpris.next(self.active_player)
+                    return True
+
+        elif self.active_tab == 1:
+            # Pomodoro Controls (Start/Pause, Reset)
+            btn_y = 165
+            cx = self.BOX_W // 2
+            if btn_y - 18 <= y <= btn_y + 18:
+                if cx - 90 <= x <= cx - 10: # Start / Pause
+                    self.pomo_running = not self.pomo_running
+                    self.queue_draw()
+                    return True
+                elif cx + 10 <= x <= cx + 90: # Reset
+                    self.pomo_running = False
+                    self.pomo_time_left = self.settings.get("pomodoro_duration", 25 * 60)
+                    self.queue_draw()
+                    return True
+
+        elif self.active_tab == 2:
+            # File Shelf Interactions
+            # Clear button (top right of shelf)
+            if px + cur_w - 90 <= x <= px + cur_w - 20 and 85 <= y <= 110:
+                self.shelf_items = []
+                save_shelf(self.shelf_items)
+                self.queue_draw()
+                return True
+
+            # Click items to open
+            item_y = 120
+            for idx, item in enumerate(self.shelf_items[:3]):
+                if px + 20 <= x <= px + cur_w - 20 and item_y <= y <= item_y + 28:
+                    # Open with xdg-open
+                    subprocess.Popen(["xdg-open", item["path"]])
+                    return True
+                item_y += 32
+
+        elif self.active_tab == 3:
+            # Water Tracker (+250ml, +500ml, Reset)
+            btn_y = 165
+            cx = self.BOX_W // 2
+            if btn_y - 18 <= y <= btn_y + 18:
+                if cx - 100 <= x <= cx - 35: # +250ml
+                    self.settings["water_current"] += 250
+                    save_settings(self.settings)
+                    self.queue_draw()
+                    return True
+                elif cx - 30 <= x <= cx + 35: # +500ml
+                    self.settings["water_current"] += 500
+                    save_settings(self.settings)
+                    self.queue_draw()
+                    return True
+                elif cx + 40 <= x <= cx + 100: # Reset
+                    self.settings["water_current"] = 0
+                    save_settings(self.settings)
+                    self.queue_draw()
+                    return True
+
+        return True
+
+    # ─── Cairo Drawing Engine ───────────────────────────────────────
+    def on_draw(self, widget, cr):
+        # Clear entire viewport to transparent
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+
+        cur_w = self.width_spring.val
+        cur_h = self.height_spring.val
+        px = (self.BOX_W - cur_w) / 2.0
+        py = 0.0
+
+        # Draw Living Notch Container
+        self.draw_capsule(cr, px, py, cur_w, cur_h)
+
+        if not self.is_expanded and cur_h <= 45.0:
+            self.draw_idle_content(cr, px, py, cur_w, cur_h)
+        else:
+            self.draw_expanded_content(cr, px, py, cur_w, cur_h)
+
+        return False
+
+    def draw_capsule(self, cr, px, py, w, h):
+        r = min(22.0, h / 2.0)
+
+        # Smooth curved bottom card
+        cr.new_sub_path()
+        cr.move_to(px, 0)
+        cr.line_to(px + w, 0)
+        cr.line_to(px + w, h - r)
+        cr.arc(px + w - r, h - r, r, 0, math.pi / 2)
+        cr.line_to(px + r, h)
+        cr.arc(px + r, h - r, r, math.pi / 2, math.pi)
+        cr.close_path()
+
+        # Obsidian Glass Background
+        grad = cairo.LinearGradient(px, 0, px, h)
+        grad.add_color_stop_rgba(0, 0.06, 0.07, 0.11, 0.96)
+        grad.add_color_stop_rgba(1, 0.08, 0.09, 0.15, 0.98)
+        cr.set_source(grad)
+        cr.fill_preserve()
+
+        # Ambient Glow Border
+        accent = self.settings.get("theme_accent", [0.50, 0.47, 0.87])
+        if self.drag_hover:
+            cr.set_source_rgba(accent[0], accent[1], accent[2], 0.9)
+            cr.set_line_width(2.2)
+        else:
+            cr.set_source_rgba(accent[0], accent[1], accent[2], 0.45)
+            cr.set_line_width(1.3)
+        cr.stroke()
+
+    def draw_idle_content(self, cr, px, py, w, h):
+        cx = self.BOX_W / 2.0
+        cy = h / 2.0
+
+        # 1. Digital Clock (Left side)
+        layout = PangoCairo.create_layout(cr)
+        font = Pango.FontDescription("Ubuntu, Sans Bold 10")
+        layout.set_font_description(font)
+        current_time = time.strftime("%H:%M")
+        layout.set_text(current_time, -1)
+        lw, lh = layout.get_pixel_size()
+
+        cr.set_source_rgba(0.9, 0.92, 0.98, 0.95)
+        cr.move_to(px + 14, cy - lh / 2.0)
+        PangoCairo.show_layout(cr, layout)
+
+        # 2. Living Mascot Eyes (Center)
+        self.draw_mascot_eyes(cr, cx, cy)
+
+        # 3. Status indicator (Right side: media icon or dot)
+        if self.active_player and self.active_player.get('status') == 'Playing':
+            cr.set_source_rgba(0.29, 0.87, 0.50, 0.95) # Green music pulse
+            layout.set_text("♫", -1)
+        elif self.pomo_running:
+            cr.set_source_rgba(0.98, 0.45, 0.45, 0.95) # Red focus pulse
+            mins = self.pomo_time_left // 60
+            secs = self.pomo_time_left % 60
+            layout.set_text(f"{mins}:{secs:02d}", -1)
+        else:
+            accent = self.settings.get("theme_accent", [0.50, 0.47, 0.87])
+            cr.set_source_rgba(accent[0], accent[1], accent[2], 0.8)
+            layout.set_text("●", -1)
+
+        rw, rh = layout.get_pixel_size()
+        cr.move_to(px + w - rw - 14, cy - rh / 2.0)
+        PangoCairo.show_layout(cr, layout)
+
+    def draw_mascot_eyes(self, cr, cx, cy):
+        eye_spacing = 11.0
+        r = 3.6
+
+        cr.save()
+        if self.mascot_state == "AWAKE":
+            # Round glowing eyes
+            cr.arc(cx - eye_spacing, cy, r, 0, 2 * math.pi)
+            cr.arc(cx + eye_spacing, cy, r, 0, 2 * math.pi)
+            cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+            cr.fill()
+        elif self.mascot_state == "BLINK":
+            # Closed line eyes
+            cr.set_line_width(2.0)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.move_to(cx - eye_spacing - r, cy)
+            cr.line_to(cx - eye_spacing + r, cy)
+            cr.move_to(cx + eye_spacing - r, cy)
+            cr.line_to(cx + eye_spacing + r, cy)
+            cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+            cr.stroke()
+        elif self.mascot_state == "HAPPY":
+            # Happy curved joyful eyes ^ ^
+            cr.set_line_width(2.0)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            # Left arc
+            cr.arc(cx - eye_spacing, cy + 1, r, math.pi + 0.3, 2 * math.pi - 0.3)
+            cr.stroke()
+            # Right arc
+            cr.arc(cx + eye_spacing, cy + 1, r, math.pi + 0.3, 2 * math.pi - 0.3)
+            cr.stroke()
+        elif self.mascot_state == "SLEEPY":
+            # Sleepy flat eyes - - with floating z
+            cr.set_line_width(1.8)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.move_to(cx - eye_spacing - r + 0.5, cy)
+            cr.line_to(cx - eye_spacing + r - 0.5, cy)
+            cr.move_to(cx + eye_spacing - r + 0.5, cy)
+            cr.line_to(cx + eye_spacing + r - 0.5, cy)
+            cr.set_source_rgba(0.7, 0.75, 0.88, 0.8)
+            cr.stroke()
+
+            # Floating z
+            layout = PangoCairo.create_layout(cr)
+            font = Pango.FontDescription("Ubuntu, Sans 8")
+            layout.set_font_description(font)
+            layout.set_text("z", -1)
+            cr.move_to(cx + eye_spacing + 7, cy - 4 - self.sleepy_z_offset)
+            cr.set_source_rgba(0.50, 0.47, 0.87, 0.85)
+            PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+    def draw_expanded_content(self, cr, px, py, w, h):
+        cx = self.BOX_W / 2.0
+
+        # Mascot & mini notch at top
+        self.draw_mascot_eyes(cr, cx, 18.0)
+
+        # Tab Navigation (Y: 36 - 68)
+        tab_w = (w - 40) / len(self.tabs)
+        tab_y = 38.0
+        tab_h = 26.0
+
+        for i, title in enumerate(self.tabs):
+            tx = px + 20 + i * tab_w
+            is_active = (i == self.active_tab)
+
+            # Tab pill background
+            cr.save()
+            cr.new_sub_path()
+            cr.arc(tx + 10, tab_y + 10, 8, math.pi, math.pi * 1.5)
+            cr.arc(tx + tab_w - 10, tab_y + 10, 8, math.pi * 1.5, 0)
+            cr.arc(tx + tab_w - 10, tab_y + tab_h - 10, 8, 0, math.pi * 0.5)
+            cr.arc(tx + 10, tab_y + tab_h - 10, 8, math.pi * 0.5, math.pi)
+            cr.close_path()
+
+            if is_active:
+                cr.set_source_rgba(0.50, 0.47, 0.87, 0.4)
+                cr.fill_preserve()
+                cr.set_source_rgba(0.50, 0.47, 0.87, 0.8)
+                cr.set_line_width(1.2)
+                cr.stroke()
+            else:
+                cr.set_source_rgba(0.12, 0.14, 0.20, 0.4)
+                cr.fill()
+
+            # Tab label
+            layout = PangoCairo.create_layout(cr)
+            font = Pango.FontDescription("Ubuntu, Sans Bold 9")
+            layout.set_font_description(font)
+            layout.set_text(title, -1)
+            tw, th = layout.get_pixel_size()
+
+            if is_active:
+                cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+            else:
+                cr.set_source_rgba(0.65, 0.68, 0.80, 0.8)
+            cr.move_to(tx + (tab_w - tw) / 2.0, tab_y + (tab_h - th) / 2.0)
+            PangoCairo.show_layout(cr, layout)
+            cr.restore()
+
+        # Divider line
+        cr.move_to(px + 20, 74)
+        cr.line_to(px + w - 20, 74)
+        cr.set_source_rgba(0.50, 0.47, 0.87, 0.25)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        # Render Active Tab Content
+        if self.active_tab == 0:
+            self.draw_music_tab(cr, px, w, h)
+        elif self.active_tab == 1:
+            self.draw_focus_tab(cr, px, w, h)
+        elif self.active_tab == 2:
+            self.draw_shelf_tab(cr, px, w, h)
+        elif self.active_tab == 3:
+            self.draw_water_tab(cr, px, w, h)
+
+    def draw_music_tab(self, cr, px, w, h):
+        cx = self.BOX_W / 2.0
+        layout = PangoCairo.create_layout(cr)
+
+        if self.active_player and self.active_player.get('title'):
+            title = self.active_player['title']
+            artist = self.active_player['artist']
+            status = self.active_player['status']
+
+            if len(title) > 34:
+                title = title[:32] + "..."
+            if len(artist) > 40:
+                artist = artist[:38] + "..."
+
+            # Title
+            font = Pango.FontDescription("Ubuntu, Sans Bold 12")
+            layout.set_font_description(font)
+            layout.set_text(title, -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+            cr.move_to(cx - tw / 2.0, 94)
+            PangoCairo.show_layout(cr, layout)
+
+            # Artist
+            font = Pango.FontDescription("Ubuntu, Sans 10")
+            layout.set_font_description(font)
+            layout.set_text(artist, -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.65, 0.70, 0.85, 0.85)
+            cr.move_to(cx - tw / 2.0, 116)
+            PangoCairo.show_layout(cr, layout)
+
+            # Media Controls (⏮ ⏯ ⏭)
+            btn_y = 155
+            # Prev
+            self.draw_circle_btn(cr, cx - 40, btn_y, 16, "⏮")
+            # Play / Pause
+            symbol = "⏸" if status == "Playing" else "▶"
+            self.draw_circle_btn(cr, cx, btn_y, 20, symbol, highlight=True)
+            # Next
+            self.draw_circle_btn(cr, cx + 40, btn_y, 16, "⏭")
+        else:
+            font = Pango.FontDescription("Ubuntu, Sans 11")
+            layout.set_font_description(font)
+            layout.set_text("Tidak ada musik yang sedang diputar", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.60, 0.65, 0.78, 0.75)
+            cr.move_to(cx - tw / 2.0, 120)
+            PangoCairo.show_layout(cr, layout)
+
+    def draw_focus_tab(self, cr, px, w, h):
+        cx = self.BOX_W / 2.0
+        layout = PangoCairo.create_layout(cr)
+
+        # Big Timer Display (e.g. 25:00)
+        mins = self.pomo_time_left // 60
+        secs = self.pomo_time_left % 60
+        font = Pango.FontDescription("Ubuntu, Monospace Bold 26")
+        layout.set_font_description(font)
+        layout.set_text(f"{mins:02d}:{secs:02d}", -1)
+        tw, th = layout.get_pixel_size()
+
+        cr.set_source_rgba(0.95, 0.98, 1.0, 1.0)
+        cr.move_to(cx - tw / 2.0, 95)
+        PangoCairo.show_layout(cr, layout)
+
+        # Action Buttons: Start/Pause, Reset
+        btn_y = 165
+        label = "JEDA" if self.pomo_running else "MULAI FOKUS"
+        self.draw_rect_btn(cr, cx - 90, btn_y - 14, 80, 28, label, highlight=self.pomo_running)
+        self.draw_rect_btn(cr, cx + 10, btn_y - 14, 80, 28, "RESET")
+
+    def draw_shelf_tab(self, cr, px, w, h):
+        layout = PangoCairo.create_layout(cr)
+
+        # Header & Clear button
+        font = Pango.FontDescription("Ubuntu, Sans Bold 10")
+        layout.set_font_description(font)
+        layout.set_text(f"LACI FILE ({len(self.shelf_items)})", -1)
+        cr.set_source_rgba(0.70, 0.74, 0.88, 0.9)
+        cr.move_to(px + 22, 88)
+        PangoCairo.show_layout(cr, layout)
+
+        if self.shelf_items:
+            self.draw_rect_btn(cr, px + w - 75, 84, 55, 22, "KOSONGKAN", font_size=8)
+
+        # File List or Drop Guide
+        if not self.shelf_items:
+            font = Pango.FontDescription("Ubuntu, Sans 10")
+            layout.set_font_description(font)
+            layout.set_text("⇣ Seret & lepas file ke sini untuk menyimpan", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.55, 0.60, 0.75, 0.7)
+            cr.move_to(self.BOX_W / 2.0 - tw / 2.0, 135)
+            PangoCairo.show_layout(cr, layout)
+        else:
+            item_y = 115
+            for item in self.shelf_items[-3:]:
+                name = item["name"]
+                if len(name) > 28:
+                    name = name[:26] + "..."
+                size = item.get("size", "")
+
+                # Item box
+                cr.save()
+                cr.rectangle(px + 20, item_y, w - 40, 26)
+                cr.set_source_rgba(0.12, 0.14, 0.22, 0.6)
+                cr.fill_preserve()
+                cr.set_source_rgba(0.50, 0.47, 0.87, 0.3)
+                cr.set_line_width(1.0)
+                cr.stroke()
+
+                # Text
+                font = Pango.FontDescription("Ubuntu, Sans 9")
+                layout.set_font_description(font)
+                layout.set_text(f"📄  {name}", -1)
+                cr.set_source_rgba(0.92, 0.95, 1.0, 0.95)
+                cr.move_to(px + 28, item_y + 4)
+                PangoCairo.show_layout(cr, layout)
+
+                layout.set_text(size, -1)
+                sw, sh = layout.get_pixel_size()
+                cr.set_source_rgba(0.65, 0.68, 0.80, 0.75)
+                cr.move_to(px + w - sw - 28, item_y + 4)
+                PangoCairo.show_layout(cr, layout)
+                cr.restore()
+
+                item_y += 30
+
+    def draw_water_tab(self, cr, px, w, h):
+        cx = self.BOX_W / 2.0
+        layout = PangoCairo.create_layout(cr)
+
+        cur = self.settings.get("water_current", 500)
+        goal = self.settings.get("water_goal", 2000)
+        pct = min(100, int((cur / goal) * 100))
+
+        # Big Water Amount Display
+        font = Pango.FontDescription("Ubuntu, Sans Bold 20")
+        layout.set_font_description(font)
+        layout.set_text(f"{cur / 1000.0:.1f} / {goal / 1000.0:.1f} L  ({pct}%)", -1)
+        tw, th = layout.get_pixel_size()
+
+        cr.set_source_rgba(0.35, 0.75, 0.98, 1.0)
+        cr.move_to(cx - tw / 2.0, 95)
+        PangoCairo.show_layout(cr, layout)
+
+        # Progress bar
+        bar_w = w - 80
+        bar_x = px + 40
+        bar_y = 130
+        bar_h = 8
+
+        cr.save()
+        cr.rectangle(bar_x, bar_y, bar_w, bar_h)
+        cr.set_source_rgba(0.12, 0.15, 0.22, 0.8)
+        cr.fill()
+
+        fill_w = bar_w * (pct / 100.0)
+        if fill_w > 0:
+            cr.rectangle(bar_x, bar_y, fill_w, bar_h)
+            cr.set_source_rgba(0.35, 0.75, 0.98, 0.9)
+            cr.fill()
+        cr.restore()
+
+        # Action Buttons (+250ml, +500ml, Reset)
+        btn_y = 165
+        self.draw_rect_btn(cr, cx - 100, btn_y - 14, 65, 28, "+250 ml")
+        self.draw_rect_btn(cr, cx - 30, btn_y - 14, 65, 28, "+500 ml")
+        self.draw_rect_btn(cr, cx + 40, btn_y - 14, 60, 28, "RESET")
+
+    # ─── UI Helper Components ───────────────────────────────────────
+    def draw_circle_btn(self, cr, bx, by, r, symbol, highlight=False):
+        cr.save()
+        cr.arc(bx, by, r, 0, 2 * math.pi)
+        if highlight:
+            cr.set_source_rgba(0.50, 0.47, 0.87, 0.9)
+            cr.fill_preserve()
+            cr.set_source_rgba(0.85, 0.82, 1.0, 1.0)
+            cr.set_line_width(1.8)
+            cr.stroke()
+        else:
+            cr.set_source_rgba(0.15, 0.17, 0.25, 0.8)
+            cr.fill_preserve()
+            cr.set_source_rgba(0.50, 0.47, 0.87, 0.4)
+            cr.set_line_width(1.2)
+            cr.stroke()
+
+        layout = PangoCairo.create_layout(cr)
+        font = Pango.FontDescription(f"Ubuntu, Sans Bold {int(r * 0.7)}")
+        layout.set_font_description(font)
+        layout.set_text(symbol, -1)
+        tw, th = layout.get_pixel_size()
+
+        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+        cr.move_to(bx - tw / 2.0, by - th / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+    def draw_rect_btn(self, cr, bx, by, bw, bh, text, highlight=False, font_size=9):
+        cr.save()
+        r = 6.0
+        cr.new_sub_path()
+        cr.arc(bx + r, by + r, r, math.pi, math.pi * 1.5)
+        cr.arc(bx + bw - r, by + r, r, math.pi * 1.5, 0)
+        cr.arc(bx + bw - r, by + bh - r, r, 0, math.pi * 0.5)
+        cr.arc(bx + r, by + bh - r, r, math.pi * 0.5, math.pi)
+        cr.close_path()
+
+        if highlight:
+            cr.set_source_rgba(0.50, 0.47, 0.87, 0.9)
+            cr.fill_preserve()
+            cr.set_source_rgba(0.85, 0.82, 1.0, 1.0)
+            cr.set_line_width(1.5)
+            cr.stroke()
+        else:
+            cr.set_source_rgba(0.15, 0.17, 0.26, 0.8)
+            cr.fill_preserve()
+            cr.set_source_rgba(0.50, 0.47, 0.87, 0.4)
+            cr.set_line_width(1.0)
+            cr.stroke()
+
+        layout = PangoCairo.create_layout(cr)
+        font = Pango.FontDescription(f"Ubuntu, Sans Bold {font_size}")
+        layout.set_font_description(font)
+        layout.set_text(text, -1)
+        tw, th = layout.get_pixel_size()
+
+        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+        cr.move_to(bx + (bw - tw) / 2.0, by + (bh - th) / 2.0)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+def main():
+    # Single instance lock
+    lock_file = open('/tmp/nusa-linux.lock', 'w')
+    try:
+        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("Nusa is already running.")
+        sys.exit(0)
+
+    app = NusaNotch()
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()
