@@ -805,11 +805,12 @@ class NusaNotch(Gtk.Window):
             border: 1px solid rgba(255, 255, 255, 0.25);
             background-color: rgba(255, 255, 255, 0.09);
         }
-        #nusa-chat-scroll {
-            background-color: rgba(255, 255, 255, 0.04);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 8px;
-            padding: 6px 10px;
+        #nusa-chat-scroll, #nusa-chat-scroll viewport, #nusa-chat-box {
+            background-color: transparent;
+            border: none;
+        }
+        #nusa-chat-box {
+            padding: 2px 4px;
         }
         #nusa-chat-box label {
             color: #f3f4f6;
@@ -869,13 +870,14 @@ class NusaNotch(Gtk.Window):
 
     def update_widget_visibility(self):
         if self.is_expanded and self.active_tab == 1:
+            self.chat_scroll.show()
+            self.chat_box.show_all()
             self.chat_entry.show()
-            self.chat_scroll.show_all()
             self.chat_entry.grab_focus()
-            GLib.idle_add(self.scroll_chat_to_bottom)
+            GLib.timeout_add(50, self.scroll_chat_to_bottom)
         else:
-            self.chat_entry.hide()
             self.chat_scroll.hide()
+            self.chat_entry.hide()
 
     def rebuild_chat_ui(self):
         for child in self.chat_box.get_children():
@@ -944,7 +946,9 @@ class NusaNotch(Gtk.Window):
                 self.chat_box.pack_start(loading_box, False, False, 0)
 
         self.chat_box.show_all()
-        GLib.idle_add(self.scroll_chat_to_bottom)
+        if self.is_expanded and self.active_tab == 1:
+            self.chat_scroll.show()
+            GLib.timeout_add(50, self.scroll_chat_to_bottom)
 
     def copy_to_clipboard(self, text, lbl):
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
@@ -2150,6 +2154,27 @@ class NusaNotch(Gtk.Window):
         cr.set_source_rgba(0.85, 0.88, 0.95, alpha * 0.90)
         cr.move_to(px + w - 34 - tw / 2.0, 81 - th / 2.0)
         PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+        # 2. Outer Chat Card Frame (Y = 92 to 188, H = 96)
+        chat_x = px + 22
+        chat_y = 92
+        chat_w = w - 44
+        chat_h = 96
+        chat_r = 8.0
+
+        cr.save()
+        cr.new_sub_path()
+        cr.arc(chat_x + chat_w - chat_r, chat_y + chat_r, chat_r, -math.pi/2, 0)
+        cr.arc(chat_x + chat_w - chat_r, chat_y + chat_h - chat_r, chat_r, 0, math.pi/2)
+        cr.arc(chat_x + chat_r, chat_y + chat_h - chat_r, chat_r, math.pi/2, math.pi)
+        cr.arc(chat_x + chat_r, chat_y + chat_r, chat_r, math.pi, 3*math.pi/2)
+        cr.close_path()
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.04)
+        cr.fill_preserve()
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.08)
+        cr.set_line_width(1.0)
+        cr.stroke()
         cr.restore()
 
         # 3. Send Button at px + w - 50, Y = 196 (28x28)
