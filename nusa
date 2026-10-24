@@ -648,85 +648,114 @@ class NusaNotch(Gtk.Window):
     def draw_idle_elements(self, cr, px, py, w, h, alpha):
         cx = self.BOX_W / 2.0
         cy = h / 2.0
+        cr.new_path()
 
-        # Clock
         layout = PangoCairo.create_layout(cr)
-        font = Pango.FontDescription("Ubuntu, Sans Bold 10")
-        layout.set_font_description(font)
-        current_time = time.strftime("%H:%M")
-        layout.set_text(current_time, -1)
-        lw, lh = layout.get_pixel_size()
 
-        cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.95)
-        cr.move_to(px + 14, cy - lh / 2.0)
-        PangoCairo.show_layout(cr, layout)
+        # 1. If music is actively playing: show mini track title centered
+        if self.active_player and self.active_player.get('status') == 'Playing' and self.active_player.get('title'):
+            title = self.active_player['title']
+            if len(title) > 18:
+                title = title[:16] + ".."
+            font = Pango.FontDescription("Ubuntu, Sans Bold 9")
+            layout.set_font_description(font)
+            layout.set_text(f"♫  {title}", -1)
+            lw, lh = layout.get_pixel_size()
+            cr.set_source_rgba(0.29, 0.87, 0.50, alpha * 0.95)
+            cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
+            PangoCairo.show_layout(cr, layout)
+            return
 
-        # Mascot Eyes
-        self.draw_mascot_eyes(cr, cx, cy, alpha)
-
-        # Status Icon (Right side)
-        if self.active_player and self.active_player.get('status') == 'Playing':
-            cr.set_source_rgba(0.29, 0.87, 0.50, alpha)
-            layout.set_text("♫", -1)
-        elif self.pomo_running:
-            cr.set_source_rgba(0.98, 0.45, 0.45, alpha)
+        # 2. If Pomodoro is running: show countdown centered
+        if self.pomo_running:
             mins = self.pomo_time_left // 60
             secs = self.pomo_time_left % 60
-            layout.set_text(f"{mins}:{secs:02d}", -1)
-        else:
-            accent = self.settings.get("theme_accent", [0.55, 0.50, 0.95])
-            cr.set_source_rgba(accent[0], accent[1], accent[2], alpha * 0.85)
-            layout.set_text("●", -1)
+            font = Pango.FontDescription("Ubuntu, Monospace Bold 10")
+            layout.set_font_description(font)
+            layout.set_text(f"⏱ {mins:02d}:{secs:02d}", -1)
+            lw, lh = layout.get_pixel_size()
+            cr.set_source_rgba(0.98, 0.45, 0.45, alpha * 0.95)
+            cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
+            PangoCairo.show_layout(cr, layout)
+            return
 
-        rw, rh = layout.get_pixel_size()
-        cr.move_to(px + w - rw - 14, cy - rh / 2.0)
-        PangoCairo.show_layout(cr, layout)
+        # 3. Nusa Living Companion Logic:
+        # When quiet / sleeping (> 15s since last action): Mascot eyes are centered!
+        # When recently active: Digital clock is cleanly centered!
+        now = time.time()
+        is_quiet = (now - self.last_hover_time > 15.0)
+
+        if is_quiet or self.mascot_state == "SLEEPY":
+            # Living Mascot Companion centered with blinking/sleeping
+            self.draw_mascot_eyes(cr, cx, cy, alpha)
+        else:
+            # Clean Digital Clock centered
+            font = Pango.FontDescription("Ubuntu, Sans Bold 11")
+            layout.set_font_description(font)
+            current_time = time.strftime("%H:%M")
+            layout.set_text(current_time, -1)
+            lw, lh = layout.get_pixel_size()
+
+            cr.set_source_rgba(0.95, 0.96, 1.0, alpha * 0.95)
+            cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
+            PangoCairo.show_layout(cr, layout)
 
     def draw_mascot_eyes(self, cr, cx, cy, alpha=1.0):
-        spacing = 10.5
+        spacing = 11.0
         rx = 3.6
-        # In AWAKE state, eyelid interpolation narrows ry
-        ry = rx * max(0.1, 1.0 - self.blink_progress)
+        ry = rx * max(0.12, 1.0 - self.blink_progress)
 
         cr.save()
+        # Always isolate paths to prevent stray line artifacts
+        cr.new_path()
+
         if self.mascot_state == "AWAKE" or self.mascot_state == "BLINK":
-            # Smoothly animated ellipse eyes (natural blinking)
+            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
             for ex in [cx - spacing, cx + spacing]:
                 cr.save()
                 cr.translate(ex, cy)
                 cr.scale(rx, ry)
+                cr.new_sub_path()
                 cr.arc(0, 0, 1.0, 0, 2 * math.pi)
+                cr.fill()
                 cr.restore()
-            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
-            cr.fill()
 
         elif self.mascot_state == "HAPPY":
-            # Curved joyful arcs ^ ^
+            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
             cr.set_line_width(2.0)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.arc(cx - spacing, cy + 1, rx, math.pi + 0.35, 2 * math.pi - 0.35)
-            cr.arc(cx + spacing, cy + 1, rx, math.pi + 0.35, 2 * math.pi - 0.35)
-            cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
+            # Left arc
+            cr.new_sub_path()
+            cr.arc(cx - spacing, cy + 1.2, rx, math.pi + 0.35, 2 * math.pi - 0.35)
+            cr.stroke()
+            # Right arc
+            cr.new_sub_path()
+            cr.arc(cx + spacing, cy + 1.2, rx, math.pi + 0.35, 2 * math.pi - 0.35)
             cr.stroke()
 
         elif self.mascot_state == "SLEEPY":
-            # Resting eyes - - with floating zZ
+            cr.set_source_rgba(0.70, 0.75, 0.88, alpha * 0.85)
             cr.set_line_width(1.8)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(cx - spacing - rx, cy)
-            cr.line_to(cx - spacing + rx, cy)
-            cr.move_to(cx + spacing - rx, cy)
-            cr.line_to(cx + spacing + rx, cy)
-            cr.set_source_rgba(0.70, 0.75, 0.88, alpha * 0.85)
+            # Sleeping curved arcs ‿   ‿
+            cr.new_sub_path()
+            cr.arc(cx - spacing, cy - 0.5, rx, 0.35, math.pi - 0.35)
+            cr.stroke()
+            cr.new_sub_path()
+            cr.arc(cx + spacing, cy - 0.5, rx, 0.35, math.pi - 0.35)
             cr.stroke()
 
+            # Floating z
+            cr.new_path()
             layout = PangoCairo.create_layout(cr)
             font = Pango.FontDescription("Ubuntu, Sans 8")
             layout.set_font_description(font)
             layout.set_text("z", -1)
             cr.move_to(cx + spacing + 7, cy - 3 - self.sleepy_z)
-            cr.set_source_rgba(0.55, 0.50, 0.95, alpha * 0.85)
+            accent = self.settings.get("theme_accent", [0.55, 0.50, 0.95])
+            cr.set_source_rgba(accent[0], accent[1], accent[2], alpha * 0.85)
             PangoCairo.show_layout(cr, layout)
+
         cr.restore()
 
     def draw_expanded_elements(self, cr, px, py, w, h, alpha):
