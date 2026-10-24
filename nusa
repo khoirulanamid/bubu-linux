@@ -766,9 +766,21 @@ class NusaNotch(Gtk.Window):
         self.connect("drag-leave", self.on_drag_leave)
         self.connect("drag-data-received", self.on_drag_drop)
 
-        # Overlaid GTK Entry for AI Chat
+        # Overlaid GTK Entry and Chat Scroll for AI Chat
         self.fixed = Gtk.Fixed()
         self.add(self.fixed)
+
+        self.chat_scroll = Gtk.ScrolledWindow()
+        self.chat_scroll.set_no_show_all(True)
+        self.chat_scroll.set_size_request(self.EXP_W - 44, 96)
+        self.chat_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.chat_scroll.set_name("nusa-chat-scroll")
+
+        self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.chat_box.set_name("nusa-chat-box")
+        self.chat_scroll.add(self.chat_box)
+        self.fixed.put(self.chat_scroll, 22, 92)
+        self.chat_scroll.hide()
 
         self.chat_entry = Gtk.Entry()
         self.chat_entry.set_no_show_all(True)
@@ -778,7 +790,7 @@ class NusaNotch(Gtk.Window):
         self.fixed.put(self.chat_entry, 22, 196)
         self.chat_entry.hide()
 
-        # Apply CSS for chat entry
+        # Apply CSS for chat entry, scroll, and copy buttons
         css_provider = Gtk.CssProvider()
         css_data = """
         entry {
@@ -793,9 +805,40 @@ class NusaNotch(Gtk.Window):
             border: 1px solid rgba(255, 255, 255, 0.25);
             background-color: rgba(255, 255, 255, 0.09);
         }
+        #nusa-chat-scroll {
+            background-color: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            padding: 6px 10px;
+        }
+        #nusa-chat-box label {
+            color: #f3f4f6;
+            font-size: 11px;
+        }
+        #nusa-chat-box label selection {
+            background-color: #2563eb;
+            color: #ffffff;
+        }
+        button.copy-btn {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            border-radius: 4px;
+            padding: 1px 6px;
+            min-height: 18px;
+        }
+        button.copy-btn:hover {
+            background: rgba(255, 255, 255, 0.14);
+        }
+        scrollbar slider {
+            background-color: rgba(255, 255, 255, 0.22);
+            border-radius: 3px;
+            min-width: 4px;
+        }
         """
         css_provider.load_from_data(css_data.encode())
         Gtk.StyleContext.add_provider_for_screen(screen, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.rebuild_chat_ui()
 
         # Floating Mini Player Island
         self.floating_player = FloatingMusicIsland(self)
@@ -827,9 +870,94 @@ class NusaNotch(Gtk.Window):
     def update_widget_visibility(self):
         if self.is_expanded and self.active_tab == 1:
             self.chat_entry.show()
+            self.chat_scroll.show_all()
             self.chat_entry.grab_focus()
+            GLib.idle_add(self.scroll_chat_to_bottom)
         else:
             self.chat_entry.hide()
+            self.chat_scroll.hide()
+
+    def rebuild_chat_ui(self):
+        for child in self.chat_box.get_children():
+            self.chat_box.remove(child)
+
+        if not self.ai_messages and not self.ai_loading:
+            placeholder_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            placeholder_box.set_margin_top(22)
+
+            title_lbl = Gtk.Label()
+            title_lbl.set_markup("<span font_weight='bold' size='medium' color='#f3f4f6'>✨ Nusa AI Agent</span>")
+            placeholder_box.pack_start(title_lbl, False, False, 0)
+
+            sub_lbl = Gtk.Label()
+            sub_lbl.set_markup("<span size='small' color='#9ca3af'>Tanyakan apa saja di bawah, atau klik ⚙ untuk setelan API.</span>")
+            placeholder_box.pack_start(sub_lbl, False, False, 0)
+
+            self.chat_box.pack_start(placeholder_box, True, True, 0)
+        else:
+            for msg in self.ai_messages[-12:]:
+                role = msg.get("role", "user")
+                text = msg.get("content", "")
+                is_user = (role == "user")
+
+                msg_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+                msg_container.set_margin_bottom(6)
+
+                # Header with role name & copy button
+                header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+
+                role_lbl = Gtk.Label()
+                color = "#93c5fd" if is_user else "#60a5fa"
+                role_name = "Anda" if is_user else "AI"
+                role_lbl.set_markup(f"<span font_weight='bold' size='small' color='{color}'>{role_name}:</span>")
+                role_lbl.set_xalign(0)
+                header_box.pack_start(role_lbl, False, False, 0)
+
+                # Copy Button for this specific message
+                copy_btn = Gtk.Button()
+                copy_btn.get_style_context().add_class("copy-btn")
+                copy_lbl = Gtk.Label()
+                copy_lbl.set_markup("<span size='x-small' color='#9ca3af'>📋 Salin</span>")
+                copy_btn.add(copy_lbl)
+                copy_btn.connect("clicked", lambda b, t=text, l=copy_lbl: self.copy_to_clipboard(t, l))
+                header_box.pack_end(copy_btn, False, False, 0)
+
+                msg_container.pack_start(header_box, False, False, 0)
+
+                # Selectable content label (Native cursor selection, highlight, Ctrl+C!)
+                content_lbl = Gtk.Label(label=text)
+                content_lbl.set_selectable(True)
+                content_lbl.set_line_wrap(True)
+                content_lbl.set_xalign(0)
+                content_lbl.set_max_width_chars(52)
+                msg_container.pack_start(content_lbl, False, False, 0)
+
+                self.chat_box.pack_start(msg_container, False, False, 0)
+
+            if self.ai_loading:
+                loading_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                loading_box.set_margin_bottom(4)
+                load_lbl = Gtk.Label()
+                load_lbl.set_markup("<span font_weight='bold' size='small' color='#60a5fa'>AI:</span> <span size='small' color='#38bdf8'>Sedang berpikir...</span>")
+                load_lbl.set_xalign(0)
+                loading_box.pack_start(load_lbl, False, False, 0)
+                self.chat_box.pack_start(loading_box, False, False, 0)
+
+        self.chat_box.show_all()
+        GLib.idle_add(self.scroll_chat_to_bottom)
+
+    def copy_to_clipboard(self, text, lbl):
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        cb.set_text(text, -1)
+        cb.store()
+        lbl.set_markup("<span size='x-small' color='#4ade80'>✓ Tersalin!</span>")
+        GLib.timeout_add(1500, lambda: lbl.set_markup("<span size='x-small' color='#9ca3af'>📋 Salin</span>"))
+
+    def scroll_chat_to_bottom(self):
+        adj = self.chat_scroll.get_vadjustment()
+        if adj:
+            adj.set_value(max(adj.get_lower(), adj.get_upper() - adj.get_page_size()))
+        return False
 
     # ─── VSync Frame Animation Engine ───────────────────────────────
     def ensure_animation(self):
@@ -933,19 +1061,13 @@ class NusaNotch(Gtk.Window):
         if not self.is_expanded:
             return False
 
-        if self.active_tab == 1: # Agent AI Tab
-            smooth, dx, dy = event.get_scroll_deltas()
-            if smooth:
-                self.ai_scroll_y += dy * 22.0
-            elif event.direction == Gdk.ScrollDirection.UP:
-                self.ai_scroll_y -= 28.0
-            elif event.direction == Gdk.ScrollDirection.DOWN:
-                self.ai_scroll_y += 28.0
-
-            # Clamp scroll position
-            self.ai_scroll_y = max(0.0, min(self.ai_scroll_y, self.ai_max_scroll))
-            self.queue_draw()
-            return True
+        if self.active_tab == 1 and self.chat_scroll.get_visible():
+            adj = self.chat_scroll.get_vadjustment()
+            if adj:
+                smooth, dx, dy = event.get_scroll_deltas()
+                delta = dy * 25.0 if smooth else (25.0 if event.direction == Gdk.ScrollDirection.DOWN else -25.0)
+                adj.set_value(max(adj.get_lower(), min(adj.get_upper() - adj.get_page_size(), adj.get_value() + delta)))
+                return True
 
         return False
 
@@ -1400,6 +1522,7 @@ class NusaNotch(Gtk.Window):
             if px + cur_w - 74 <= x <= px + cur_w - 48 and 70 <= y <= 94:
                 self.ai_messages = []
                 save_chat(self.ai_messages)
+                self.rebuild_chat_ui()
                 self.queue_draw()
                 return True
 
@@ -1457,6 +1580,7 @@ class NusaNotch(Gtk.Window):
         self.chat_entry.set_text("")
         self.ai_messages.append({"role": "user", "content": text})
         save_chat(self.ai_messages)
+        self.rebuild_chat_ui()
 
         api_key = self.settings.get("ai_api_key", "").strip()
         base_url = self.settings.get("ai_base_url", "https://openrouter.ai/api/v1").strip()
@@ -1468,11 +1592,12 @@ class NusaNotch(Gtk.Window):
                 "content": "⚠️ API Key belum disetel. Klik tombol ⚙ di kanan atas untuk mengatur Base URL & API Key."
             })
             save_chat(self.ai_messages)
+            self.rebuild_chat_ui()
             self.queue_draw()
             return
 
         self.ai_loading = True
-        self.ai_scroll_y = 999999.0
+        self.rebuild_chat_ui()
         self.queue_draw()
 
         def _worker():
@@ -1491,7 +1616,7 @@ class NusaNotch(Gtk.Window):
         self.ai_loading = False
         self.ai_messages.append({"role": "assistant", "content": reply})
         save_chat(self.ai_messages)
-        self.ai_scroll_y = 999999.0
+        self.rebuild_chat_ui()
         self.queue_draw()
         if not self.is_expanded:
             preview = reply[:120] + "..." if len(reply) > 120 else reply
@@ -2026,141 +2151,6 @@ class NusaNotch(Gtk.Window):
         cr.move_to(px + w - 34 - tw / 2.0, 81 - th / 2.0)
         PangoCairo.show_layout(cr, layout)
         cr.restore()
-
-        # 2. Scrollable Chat Conversation Box (Y = 92 to 186, H = 94)
-        chat_x = px + 22
-        chat_y = 92
-        chat_w = w - 44
-        chat_h = 94
-        chat_r = 8.0
-
-        cr.save()
-        cr.new_sub_path()
-        cr.arc(chat_x + chat_w - chat_r, chat_y + chat_r, chat_r, -math.pi/2, 0)
-        cr.arc(chat_x + chat_w - chat_r, chat_y + chat_h - chat_r, chat_r, 0, math.pi/2)
-        cr.arc(chat_x + chat_r, chat_y + chat_h - chat_r, chat_r, math.pi/2, math.pi)
-        cr.arc(chat_x + chat_r, chat_y + chat_r, chat_r, math.pi, 3*math.pi/2)
-        cr.close_path()
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.04)
-        cr.fill_preserve()
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.07)
-        cr.set_line_width(1.0)
-        cr.stroke()
-        cr.restore()
-
-        if not self.ai_messages and not self.ai_loading:
-            layout.set_width(-1)
-            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 9.5"))
-            layout.set_text("✨ Nusa AI Agent", -1)
-            tw, th = layout.get_pixel_size()
-            cr.set_source_rgba(0.92, 0.94, 0.98, alpha * 0.95)
-            cr.move_to(cx - tw / 2.0, chat_y + 24)
-            PangoCairo.show_layout(cr, layout)
-
-            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8"))
-            layout.set_text("Tanyakan apa saja di bawah, atau klik ⚙ untuk setelan API.", -1)
-            tw, th = layout.get_pixel_size()
-            cr.set_source_rgba(0.50, 0.53, 0.60, alpha * 0.85)
-            cr.move_to(cx - tw / 2.0, chat_y + 46)
-            PangoCairo.show_layout(cr, layout)
-
-        else:
-            # Measure and prepare all conversation items
-            content_w = int((chat_w - 24) * Pango.SCALE)
-            layout.set_width(content_w)
-
-            curr_y = 0
-            rendered_items = []
-            for m in self.ai_messages[-12:]: # display up to last 12 messages
-                role = m.get("role", "user")
-                text = m.get("content", "")
-                is_user = (role == "user")
-
-                header_text = "Anda:" if is_user else "AI:"
-                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8.5"))
-                layout.set_text(header_text, -1)
-                _, h_th = layout.get_pixel_size()
-
-                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
-                layout.set_text(text, -1)
-                _, b_th = layout.get_pixel_size()
-
-                rendered_items.append({
-                    "is_user": is_user,
-                    "header": header_text,
-                    "text": text,
-                    "y": curr_y,
-                    "h_th": h_th,
-                    "b_th": b_th
-                })
-                curr_y += h_th + b_th + 10
-
-            if self.ai_loading:
-                dots = "● " * (int(self.visualizer_phase * 1.5) % 4)
-                loading_text = f"Sedang berpikir {dots}"
-                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
-                layout.set_text(loading_text, -1)
-                _, l_th = layout.get_pixel_size()
-                rendered_items.append({
-                    "is_loading": True,
-                    "header": "AI:",
-                    "text": loading_text,
-                    "y": curr_y,
-                    "h_th": 12,
-                    "b_th": l_th
-                })
-                curr_y += 12 + l_th + 10
-
-            total_content_h = curr_y
-            self.ai_max_scroll = max(0.0, total_content_h - (chat_h - 16))
-            self.ai_scroll_y = max(0.0, min(self.ai_scroll_y, self.ai_max_scroll))
-
-            # Clip inside container & translate
-            cr.save()
-            cr.rectangle(chat_x + 3, chat_y + 3, chat_w - 6, chat_h - 6)
-            cr.clip()
-            cr.translate(0, -self.ai_scroll_y)
-
-            for item in rendered_items:
-                iy = chat_y + 8 + item["y"]
-
-                # Header
-                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 8.5"))
-                layout.set_text(item["header"], -1)
-                if item.get("is_user"):
-                    cr.set_source_rgba(0.70, 0.75, 0.85, alpha * 0.90)
-                else:
-                    cr.set_source_rgba(0.40, 0.75, 1.0, alpha * 0.95)
-                cr.move_to(chat_x + 10, iy)
-                PangoCairo.show_layout(cr, layout)
-
-                # Body text
-                layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 8.5"))
-                layout.set_text(item["text"], -1)
-                if item.get("is_loading"):
-                    cr.set_source_rgba(0.40, 0.75, 1.0, alpha * 0.85)
-                else:
-                    cr.set_source_rgba(0.95, 0.96, 0.98, alpha * 0.95)
-                cr.move_to(chat_x + 10, iy + item["h_th"] + 2)
-                PangoCairo.show_layout(cr, layout)
-
-            cr.restore()
-
-            # Hardware Scrollbar Indicator if content overflows
-            if self.ai_max_scroll > 0:
-                cr.save()
-                sb_w = 2.5
-                sb_x = chat_x + chat_w - 6.0
-                thumb_h = max(16.0, (chat_h / total_content_h) * chat_h)
-                thumb_y = chat_y + 4 + (self.ai_scroll_y / self.ai_max_scroll) * (chat_h - thumb_h - 8)
-                cr.new_sub_path()
-                r = sb_w / 2.0
-                cr.arc(sb_x + r, thumb_y + r, r, math.pi, 0)
-                cr.arc(sb_x + r, thumb_y + thumb_h - r, r, 0, math.pi)
-                cr.close_path()
-                cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.28)
-                cr.fill()
-                cr.restore()
 
         # 3. Send Button at px + w - 50, Y = 196 (28x28)
         cr.save()
