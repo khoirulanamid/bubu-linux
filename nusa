@@ -700,6 +700,13 @@ class NusaNotch(Gtk.Window):
         self.next_blink_time = time.time() + 3.0
         self.sleepy_z = 0.0
 
+        # Gaze animation (front, left, right, up, down)
+        self.gaze_x = 0.0
+        self.gaze_y = 0.0
+        self.target_gaze_x = 0.0
+        self.target_gaze_y = 0.0
+        self.next_gaze_time = time.time() + 2.0
+
         # Tabs: 0: Music, 1: Agent AI, 2: Focus, 3: Shelf
         self.active_tab = 0
         self.tabs = ["Music", "Agent AI", "Focus", "Shelf"]
@@ -1010,6 +1017,7 @@ class NusaNotch(Gtk.Window):
                 self.floating_player.queue_draw()
 
         if self.mascot_state == "AWAKE":
+            # 1. Blink exactly every 3 seconds
             if not self.is_blinking and now >= self.next_blink_time:
                 self.is_blinking = True
                 self.blink_start = now
@@ -1022,7 +1030,35 @@ class NusaNotch(Gtk.Window):
                 else:
                     self.is_blinking = False
                     self.blink_progress = 0.0
-                    self.next_blink_time = now + 3.0 + (hash(str(now)) % 30) / 10.0
+                    self.next_blink_time = now + 3.0
+                self.queue_draw()
+
+            # 2. Natural Gaze Look-Around (Front, Left, Right, Up, Down)
+            if now >= self.next_gaze_time:
+                r_val = int(now * 100) % 10
+                if r_val in [0, 1, 2, 3]: # 40%: look forward / front
+                    self.target_gaze_x = 0.0
+                    self.target_gaze_y = 0.0
+                elif r_val in [4, 5]: # 20%: look left (samping kiri)
+                    self.target_gaze_x = -1.6
+                    self.target_gaze_y = 0.0
+                elif r_val in [6, 7]: # 20%: look right (samping kanan)
+                    self.target_gaze_x = 1.6
+                    self.target_gaze_y = 0.0
+                elif r_val == 8: # 10%: look down (bawah)
+                    self.target_gaze_x = 0.0
+                    self.target_gaze_y = 1.2
+                else: # 10%: look up (atas)
+                    self.target_gaze_x = 0.0
+                    self.target_gaze_y = -1.2
+                self.next_gaze_time = now + 2.0 + (int(now * 10) % 20) / 10.0
+
+            # Smooth fluid gaze interpolation
+            dx = self.target_gaze_x - self.gaze_x
+            dy = self.target_gaze_y - self.gaze_y
+            if abs(dx) > 0.02 or abs(dy) > 0.02:
+                self.gaze_x += dx * 0.20
+                self.gaze_y += dy * 0.20
                 self.queue_draw()
 
         elif self.mascot_state == "SLEEPY":
@@ -1589,18 +1625,30 @@ class NusaNotch(Gtk.Window):
         if self.mascot_state == "AWAKE" or self.mascot_state == "BLINK":
             for ex in [cx - spacing, cx + spacing]:
                 cr.save()
+                # 1. White Eye Sclera (rounded pill, shrinks vertically during blink)
+                cr.save()
                 cr.translate(ex, cy)
                 cr.scale(rx, ry)
-                cr.new_sub_path()
                 cr.arc(0, 0, 1.0, 0, 2 * math.pi)
-                cr.set_source_rgba(0.92, 0.94, 0.98, alpha)
-                cr.fill()
                 cr.restore()
-                # Sparkle highlight when not fully closed
-                if self.blink_progress < 0.2:
-                    cr.set_source_rgba(0.05, 0.05, 0.06, alpha * 0.95)
-                    cr.arc(ex + 1.0, cy - 0.8, 0.9, 0, 2 * math.pi)
+                cr.set_source_rgba(0.94, 0.96, 0.99, alpha)
+                cr.fill_preserve()
+                cr.clip() # Ensure pupil stays strictly inside eye boundary
+
+                # 2. Pupil looking in gaze direction (gaze_x, gaze_y)
+                if self.blink_progress < 0.40:
+                    px = ex + self.gaze_x
+                    py = cy + self.gaze_y
+                    cr.arc(px, py, 1.6, 0, 2 * math.pi)
+                    cr.set_source_rgba(0.06, 0.07, 0.09, alpha * 0.98)
                     cr.fill()
+
+                    # 3. Catchlight Sparkle (twinkle shine reflection)
+                    cr.arc(px - 0.55, py - 0.55, 0.55, 0, 2 * math.pi)
+                    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.95)
+                    cr.fill()
+
+                cr.restore()
 
         elif self.mascot_state == "HAPPY":
             cr.set_source_rgba(0.92, 0.94, 0.98, alpha)
