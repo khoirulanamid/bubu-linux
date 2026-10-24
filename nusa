@@ -3,11 +3,11 @@
 Nusa for Linux — A living, interactive notch for Linux desktop.
 Inspired by Nusa (https://rama2555.github.io/nusa/).
 
-Engine v3.0:
-- Physical micro-window geometry: 166x30 when idle, strictly bounded to the visible pill.
-- Zero premature activation: cursor outside the notch NEVER triggers anything.
-- Click or direct hover on the pill to expand smoothly to 430x224.
-- 100% clean Cairo paths: zero stray line artifacts or text collisions.
+Engine v3.1:
+- Auto App Detection: Spotify, YouTube, VLC, Firefox, or Local Player with real vector branding.
+- Dynamic Animated "Candle Suara" (Audio Equalizer Visualizer): Real-time harmonic audio wave bars.
+- Physical micro-window geometry: 166x30 when idle, strictly bounded to the visible pill (zero early activation).
+- Hardware pointer watchdog: Notch closes reliably and instantly when cursor leaves.
 - Hardware-synced VSync (add_tick_callback) with fluid Apple/Nusa spring physics.
 - MPRIS Media Player integration, Pomodoro focus timer, File shelf, and Water tracker.
 """
@@ -151,13 +151,15 @@ class MprisController:
                     title = meta.get('xesam:title', '')
                     artist_raw = meta.get('xesam:artist', [])
                     artist = ', '.join(artist_raw) if isinstance(artist_raw, list) else str(artist_raw or '')
+                    url = meta.get('xesam:url', '')
 
                     info = {
                         'name': p,
                         'proxy': pp,
                         'status': status,
                         'title': str(title or 'Unknown Track'),
-                        'artist': str(artist or 'Unknown Artist')
+                        'artist': str(artist or 'Unknown Artist'),
+                        'url': str(url or '')
                     }
                     if status == 'Playing':
                         return info
@@ -238,6 +240,9 @@ class NusaNotch(Gtk.Window):
         # Pomodoro
         self.pomo_running = False
         self.pomo_time_left = self.settings.get("pomodoro_duration", 25 * 60)
+
+        # Audio Visualizer "Candle Suara"
+        self.visualizer_phase = 0.0
 
         # State flags
         self.drag_hover = False
@@ -322,15 +327,15 @@ class NusaNotch(Gtk.Window):
         self.is_expanded = True
         self.mascot_state = "HAPPY"
 
-        # 1. Resize window to full expanded canvas
+        # Resize window to full canvas
         self.resize(self.EXP_W, self.EXP_H)
         self.reposition(self.EXP_W)
 
-        # 2. Trigger spring expansion
+        # Trigger spring expansion
         self.spring.set_target(1.0)
         self.ensure_animation()
 
-        # 3. Start pointer watchdog to guarantee auto-close even if X11 drops leave event
+        # Start pointer watchdog to guarantee auto-close
         if self.watchdog_id == 0:
             self.watchdog_id = GLib.timeout_add(150, self.check_pointer_watchdog)
 
@@ -478,6 +483,12 @@ class NusaNotch(Gtk.Window):
 
     def on_fast_tick(self):
         now = time.time()
+
+        # Animate Audio Visualizer Candle when playing
+        if self.active_player and self.active_player.get('status') == 'Playing':
+            self.visualizer_phase = (self.visualizer_phase + 0.18) % (math.pi * 20.0)
+            self.queue_draw()
+
         if self.mascot_state == "AWAKE":
             if not self.is_blinking and now >= self.next_blink_time:
                 self.is_blinking = True
@@ -499,6 +510,136 @@ class NusaNotch(Gtk.Window):
             self.queue_draw()
 
         return True
+
+    # ─── Source App Detection & Logo Rendering ──────────────────────
+    def detect_source(self, player_info):
+        if not player_info:
+            return {'type': 'music', 'label': 'MUSIC', 'color': [0.55, 0.50, 0.95]}
+        name = (player_info.get('name') or '').lower()
+        title = (player_info.get('title') or '').lower()
+        artist = (player_info.get('artist') or '').lower()
+        url = (player_info.get('url') or '').lower()
+
+        if 'spotify' in name or 'spotify' in url:
+            return {'type': 'spotify', 'label': 'SPOTIFY', 'color': [0.11, 0.73, 0.33]} # #1DB954
+        elif 'youtube' in url or 'youtube' in title or 'chromium' in name or 'chrome' in name or 'brave' in name or 'edge' in name:
+            return {'type': 'youtube', 'label': 'YOUTUBE', 'color': [0.95, 0.20, 0.20]} # #FF0000
+        elif 'vlc' in name:
+            return {'type': 'vlc', 'label': 'VLC', 'color': [1.0, 0.55, 0.0]}
+        elif 'firefox' in name:
+            return {'type': 'firefox', 'label': 'FIREFOX', 'color': [1.0, 0.40, 0.15]}
+        else:
+            return {'type': 'local', 'label': 'LOCAL PLAYER', 'color': [0.55, 0.50, 0.95]}
+
+    def draw_source_logo(self, cr, cx, cy, size, source_type):
+        cr.save()
+        cr.translate(cx, cy)
+        cr.new_path()
+
+        if source_type == 'youtube':
+            w, h, r = size * 0.68, size * 0.48, size * 0.15
+            cr.new_sub_path()
+            cr.arc(w/2 - r, -h/2 + r, r, -math.pi/2, 0)
+            cr.arc(w/2 - r, h/2 - r, r, 0, math.pi/2)
+            cr.arc(-w/2 + r, h/2 - r, r, math.pi/2, math.pi)
+            cr.arc(-w/2 + r, -h/2 + r, r, math.pi, 3*math.pi/2)
+            cr.close_path()
+            cr.set_source_rgba(0.95, 0.15, 0.15, 1.0)
+            cr.fill()
+            # White Play Triangle
+            cr.new_sub_path()
+            tw = size * 0.11
+            cr.move_to(-tw * 0.6, -tw)
+            cr.line_to(tw, 0)
+            cr.line_to(-tw * 0.6, tw)
+            cr.close_path()
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+            cr.fill()
+
+        elif source_type == 'spotify':
+            r = size * 0.35
+            cr.arc(0, 0, r, 0, 2 * math.pi)
+            cr.set_source_rgba(0.11, 0.73, 0.33, 1.0)
+            cr.fill()
+            # 3 curved black soundwave arcs
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.set_source_rgba(0.06, 0.07, 0.10, 0.95)
+            # Top
+            cr.set_line_width(size * 0.055)
+            cr.new_sub_path()
+            cr.arc(0, r * 0.6, r * 0.88, -math.pi * 0.72, -math.pi * 0.28)
+            cr.stroke()
+            # Mid
+            cr.set_line_width(size * 0.045)
+            cr.new_sub_path()
+            cr.arc(0, r * 0.48, r * 0.62, -math.pi * 0.74, -math.pi * 0.26)
+            cr.stroke()
+            # Bottom
+            cr.set_line_width(size * 0.038)
+            cr.new_sub_path()
+            cr.arc(0, r * 0.36, r * 0.40, -math.pi * 0.75, -math.pi * 0.25)
+            cr.stroke()
+
+        elif source_type == 'vlc':
+            cr.set_source_rgba(1.0, 0.55, 0.0, 1.0)
+            cr.new_sub_path()
+            cr.move_to(-size * 0.24, size * 0.26)
+            cr.line_to(-size * 0.07, -size * 0.26)
+            cr.line_to(size * 0.07, -size * 0.26)
+            cr.line_to(size * 0.24, size * 0.26)
+            cr.close_path()
+            cr.fill()
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.9)
+            cr.rectangle(-size * 0.16, size * 0.02, size * 0.32, size * 0.08)
+            cr.fill()
+            cr.set_source_rgba(0.9, 0.45, 0.0, 1.0)
+            cr.rectangle(-size * 0.30, size * 0.26, size * 0.60, size * 0.07)
+            cr.fill()
+
+        else:
+            r = size * 0.35
+            cr.arc(0, 0, r, 0, 2 * math.pi)
+            cr.set_source_rgba(0.55, 0.50, 0.95, 0.85)
+            cr.fill()
+            layout = PangoCairo.create_layout(cr)
+            font = Pango.FontDescription(f"Ubuntu, Sans Bold {int(size * 0.32)}")
+            layout.set_font_description(font)
+            layout.set_text("♫", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+            cr.move_to(-tw / 2.0, -th / 2.0)
+            PangoCairo.show_layout(cr, layout)
+
+        cr.restore()
+
+    def draw_visualizer_bars(self, cr, cx, cy, num_bars, is_playing, color, max_h=26.0, bar_w=3.5, bar_gap=3.0, alpha=1.0):
+        cr.save()
+        cr.translate(cx, cy)
+        total_w = num_bars * bar_w + (num_bars - 1) * bar_gap
+        start_x = -total_w / 2.0
+
+        for i in range(num_bars):
+            if is_playing:
+                phase = self.visualizer_phase + i * 1.35
+                h_norm = 0.45 * math.sin(phase) + 0.30 * math.sin(phase * 1.7 + 0.5) + 0.55
+                bh = 5.0 + (max_h - 5.0) * max(0.0, min(1.0, h_norm))
+            else:
+                bh = 3.5
+
+            bx = start_x + i * (bar_w + bar_gap)
+            by = -bh / 2.0
+            r = bar_w / 2.0
+
+            cr.new_path()
+            cr.new_sub_path()
+            cr.arc(bx + r, by + r, r, math.pi, 0)
+            cr.arc(bx + r, by + bh - r, r, 0, math.pi)
+            cr.close_path()
+
+            cr.set_source_rgba(color[0], color[1], color[2], alpha * 0.95)
+            cr.fill()
+
+        cr.restore()
 
     # ─── Content Click Interactions ─────────────────────────────────
     def on_button_press(self, widget, event):
@@ -528,7 +669,7 @@ class NusaNotch(Gtk.Window):
 
         # 2. Content Interactions
         if self.active_tab == 0: # Music
-            btn_y = 158
+            btn_y = 168
             cx = self.EXP_W / 2.0
             if btn_y - 22 <= y <= btn_y + 22:
                 if cx - 65 <= x <= cx - 25:
@@ -598,10 +739,6 @@ class NusaNotch(Gtk.Window):
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
 
-        alloc = self.get_allocation()
-        win_w = alloc.width
-        win_h = alloc.height
-
         if not self.is_expanded and self.spring.val == 0.0:
             # IDLE: Exactly fills the 166x30 window
             px = 0.0
@@ -669,18 +806,31 @@ class NusaNotch(Gtk.Window):
         cr.new_path()
         layout = PangoCairo.create_layout(cr)
 
-        # 1. Active Music Playing
+        # 1. Active Music Playing in Idle Pill
         if self.active_player and self.active_player.get('status') == 'Playing' and self.active_player.get('title'):
+            source = self.detect_source(self.active_player)
+            scolor = source['color']
             title = self.active_player['title']
-            if len(title) > 18:
-                title = title[:16] + ".."
+            if len(title) > 15:
+                title = title[:13] + ".."
+
+            # Mini source indicator on left
+            cr.new_path()
+            cr.arc(cx - 62, cy, 3.5, 0, 2 * math.pi)
+            cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.95)
+            cr.fill()
+
+            # Track title
             font = Pango.FontDescription("Ubuntu, Sans Bold 9")
             layout.set_font_description(font)
-            layout.set_text(f"♫  {title}", -1)
+            layout.set_text(title, -1)
             lw, lh = layout.get_pixel_size()
-            cr.set_source_rgba(0.29, 0.87, 0.50, alpha * 0.95)
+            cr.set_source_rgba(0.92, 0.95, 1.0, alpha * 0.95)
             cr.move_to(cx - lw / 2.0, cy - lh / 2.0)
             PangoCairo.show_layout(cr, layout)
+
+            # Mini 3-bar animated candle visualizer on right
+            self.draw_visualizer_bars(cr, cx + 62, cy, num_bars=3, is_playing=True, color=scolor, max_h=12.0, bar_w=2.2, bar_gap=2.0, alpha=alpha)
             return
 
         # 2. Pomodoro Active
@@ -840,36 +990,82 @@ class NusaNotch(Gtk.Window):
             title = self.active_player['title']
             artist = self.active_player['artist']
             status = self.active_player['status']
+            is_playing = (status == 'Playing')
+            source = self.detect_source(self.active_player)
+            scolor = source['color']
 
-            if len(title) > 34:
-                title = title[:32] + "..."
-            if len(artist) > 40:
-                artist = artist[:38] + "..."
+            # 1. Left: 50x50 Album / App Glass Card
+            card_x = px + 24
+            card_y = 86
+            card_s = 50
+            card_r = 13
+
+            cr.save()
+            cr.new_path()
+            cr.new_sub_path()
+            cr.arc(card_x + card_s - card_r, card_y + card_r, card_r, -math.pi/2, 0)
+            cr.arc(card_x + card_s - card_r, card_y + card_s - card_r, card_r, 0, math.pi/2)
+            cr.arc(card_x + card_r, card_y + card_s - card_r, card_r, math.pi/2, math.pi)
+            cr.arc(card_x + card_r, card_y + card_r, card_r, math.pi, 3*math.pi/2)
+            cr.close_path()
+
+            cr.set_source_rgba(0.10, 0.12, 0.18, alpha * 0.92)
+            cr.fill_preserve()
+            cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.45)
+            cr.set_line_width(1.3)
+            cr.stroke()
+
+            # Draw Logo inside card
+            self.draw_source_logo(cr, card_x + card_s / 2.0, card_y + card_s / 2.0, card_s, source['type'])
+            cr.restore()
+
+            # 2. Middle: Text Info
+            text_x = px + 86
+
+            # Source badge
+            font = Pango.FontDescription("Ubuntu, Sans Bold 8")
+            layout.set_font_description(font)
+            layout.set_text(f"● {source['label']}", -1)
+            cr.set_source_rgba(scolor[0], scolor[1], scolor[2], alpha * 0.95)
+            cr.move_to(text_x, 86)
+            PangoCairo.show_layout(cr, layout)
 
             # Title
+            if len(title) > 28:
+                display_title = title[:26] + ".."
+            else:
+                display_title = title
             font = Pango.FontDescription("Ubuntu, Sans Bold 12")
             layout.set_font_description(font)
-            layout.set_text(title, -1)
-            tw, th = layout.get_pixel_size()
+            layout.set_text(display_title, -1)
             cr.set_source_rgba(0.95, 0.98, 1.0, alpha)
-            cr.move_to(cx - tw / 2.0, 94)
+            cr.move_to(text_x, 101)
             PangoCairo.show_layout(cr, layout)
 
             # Artist
+            if len(artist) > 34:
+                display_artist = artist[:32] + ".."
+            else:
+                display_artist = artist
             font = Pango.FontDescription("Ubuntu, Sans 10")
             layout.set_font_description(font)
-            layout.set_text(artist, -1)
-            tw, th = layout.get_pixel_size()
+            layout.set_text(display_artist, -1)
             cr.set_source_rgba(0.68, 0.72, 0.85, alpha * 0.85)
-            cr.move_to(cx - tw / 2.0, 116)
+            cr.move_to(text_x, 120)
             PangoCairo.show_layout(cr, layout)
 
-            # Controls
-            btn_y = 158
-            self.draw_circle_btn(cr, cx - 42, btn_y, 16, "⏮", alpha=alpha)
-            symbol = "⏸" if status == "Playing" else "▶"
+            # 3. Right: Candle Suara (Audio Visualizer)
+            viz_x = px + w - 38
+            viz_y = 110
+            self.draw_visualizer_bars(cr, viz_x, viz_y, num_bars=5, is_playing=is_playing, color=scolor, max_h=26.0, bar_w=3.5, bar_gap=3.0, alpha=alpha)
+
+            # 4. Bottom Controls at Y=168
+            btn_y = 168
+            self.draw_circle_btn(cr, cx - 44, btn_y, 16, "⏮", alpha=alpha)
+            symbol = "⏸" if is_playing else "▶"
             self.draw_circle_btn(cr, cx, btn_y, 20, symbol, highlight=True, alpha=alpha)
-            self.draw_circle_btn(cr, cx + 42, btn_y, 16, "⏭", alpha=alpha)
+            self.draw_circle_btn(cr, cx + 44, btn_y, 16, "⏭", alpha=alpha)
+
         else:
             font = Pango.FontDescription("Ubuntu, Sans 11")
             layout.set_font_description(font)
