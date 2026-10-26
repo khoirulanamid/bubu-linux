@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-Nusa for Linux — A living, interactive notch for Linux desktop.
+Bubu for Linux — A living, interactive notch for Linux desktop.
 Inspired by Nusa (https://rama2555.github.io/nusa/).
 
 Engine v3.5:
@@ -44,7 +44,7 @@ import threading
 import subprocess
 import fcntl
 
-CONFIG_DIR = os.path.expanduser("~/.config/nusa")
+CONFIG_DIR = os.path.expanduser("~/.config/bubu")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 SHELF_FILE = os.path.join(CONFIG_DIR, "shelf.json")
 CHAT_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
@@ -60,7 +60,7 @@ DEFAULT_SETTINGS = {
     "ai_base_url": "https://openrouter.ai/api/v1",
     "ai_api_key": "",
     "ai_model": "anthropic/claude-3.5-sonnet",
-    "ai_system_prompt": "Kamu adalah asisten AI Nusa yang cerdas, ringkas, dan ramah di desktop Linux. Berikan jawaban yang padat, akurat, dan langsung ke inti."
+    "ai_system_prompt": "Kamu adalah asisten AI Bubu yang cerdas, ringkas, dan ramah di desktop Linux. Berikan jawaban yang padat, akurat, dan langsung ke inti."
 }
 
 def load_settings():
@@ -80,7 +80,7 @@ def save_settings(settings):
         with open(CONFIG_FILE, 'w') as f:
             json.dump(settings, f, indent=2)
     except Exception as e:
-        print("[Nusa] Error saving settings:", e)
+        print("[Bubu] Error saving settings:", e)
 
 def load_shelf():
     if os.path.exists(SHELF_FILE):
@@ -96,7 +96,7 @@ def save_shelf(shelf_items):
         with open(SHELF_FILE, 'w') as f:
             json.dump(shelf_items, f, indent=2)
     except Exception as e:
-        print("[Nusa] Error saving shelf:", e)
+        print("[Bubu] Error saving shelf:", e)
 
 def load_chat():
     if os.path.exists(CHAT_FILE):
@@ -112,7 +112,7 @@ def save_chat(messages):
         with open(CHAT_FILE, 'w') as f:
             json.dump(messages[-20:], f, indent=2)
     except Exception as e:
-        print("[Nusa] Error saving chat:", e)
+        print("[Bubu] Error saving chat:", e)
 
 def format_duration(seconds):
     if seconds <= 0:
@@ -234,7 +234,7 @@ def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
 class AISettingsDialog(Gtk.Window):
     def __init__(self, current_settings, on_save_cb):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
-        self.set_title("Pengaturan AI Agent — Nusa")
+        self.set_title("Pengaturan AI Agent — Bubu")
         self.set_default_size(440, 390)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_resizable(False)
@@ -491,8 +491,8 @@ class FloatingMusicIsland(Gtk.Window):
     def __init__(self, main_notch):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.main_notch = main_notch
-        self.set_name("nusa-floating-island")
-        self.set_title("Nusa Music Island")
+        self.set_name("bubu-floating-island")
+        self.set_title("Bubu Music Island")
         self.set_decorated(False)
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
@@ -610,7 +610,7 @@ class FloatingMusicIsland(Gtk.Window):
         # 3. Middle: Text Info
         layout = PangoCairo.create_layout(cr)
         title = player.get('title') if player else "Tidak ada musik"
-        artist = player.get('artist') if player else "Nusa Floating Player"
+        artist = player.get('artist') if player else "Bubu Floating Player"
 
         if len(title) > 22:
             display_title = title[:20] + ".."
@@ -664,12 +664,12 @@ class FloatingMusicIsland(Gtk.Window):
 
         return False
 
-# ─── Main Nusa Living Notch ─────────────────────────────────────────
-class NusaNotch(Gtk.Window):
+# ─── Main Bubu Living Notch ─────────────────────────────────────────
+class BubuNotch(Gtk.Window):
     def __init__(self):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
-        self.set_name("nusa-living-notch")
-        self.set_title("Nusa")
+        self.set_name("bubu-living-notch")
+        self.set_title("Bubu")
         self.set_decorated(False)
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
@@ -774,10 +774,10 @@ class NusaNotch(Gtk.Window):
         self.chat_scroll.set_no_show_all(True)
         self.chat_scroll.set_size_request(self.EXP_W - 44, 96)
         self.chat_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.chat_scroll.set_name("nusa-chat-scroll")
+        self.chat_scroll.set_name("bubu-chat-scroll")
 
         self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.chat_box.set_name("nusa-chat-box")
+        self.chat_box.set_name("bubu-chat-box")
         self.chat_scroll.add(self.chat_box)
         self.fixed.put(self.chat_scroll, 22, 92)
         self.chat_scroll.hide()
@@ -805,18 +805,18 @@ class NusaNotch(Gtk.Window):
             border: 1px solid rgba(255, 255, 255, 0.25);
             background-color: rgba(255, 255, 255, 0.09);
         }
-        #nusa-chat-scroll, #nusa-chat-scroll viewport, #nusa-chat-box {
+        #bubu-chat-scroll, #bubu-chat-scroll viewport, #bubu-chat-box {
             background-color: transparent;
             border: none;
         }
-        #nusa-chat-box {
+        #bubu-chat-box {
             padding: 2px 4px;
         }
-        #nusa-chat-box label {
+        #bubu-chat-box label {
             color: #f3f4f6;
             font-size: 11px;
         }
-        #nusa-chat-box label selection {
+        #bubu-chat-box label selection {
             background-color: #2563eb;
             color: #ffffff;
         }
@@ -888,7 +888,7 @@ class NusaNotch(Gtk.Window):
             placeholder_box.set_margin_top(22)
 
             title_lbl = Gtk.Label()
-            title_lbl.set_markup("<span font_weight='bold' size='medium' color='#f3f4f6'>✨ Nusa AI Agent</span>")
+            title_lbl.set_markup("<span font_weight='bold' size='medium' color='#f3f4f6'>✨ Bubu AI Agent</span>")
             placeholder_box.pack_start(title_lbl, False, False, 0)
 
             sub_lbl = Gtk.Label()
@@ -1117,7 +1117,7 @@ class NusaNotch(Gtk.Window):
             self.update_widget_visibility()
             self.queue_draw()
             subprocess.Popen(
-                ["notify-send", "-a", "Nusa", "Nusa File Shelf", f"Menyimpan {len(uris)} file ke shelf."],
+                ["notify-send", "-a", "Bubu", "Bubu File Shelf", f"Menyimpan {len(uris)} file ke shelf."],
                 env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority"))
             )
 
@@ -1138,7 +1138,7 @@ class NusaNotch(Gtk.Window):
             if self.pomo_time_left == 0:
                 self.pomo_running = False
                 subprocess.Popen(
-                    ["notify-send", "-a", "Nusa", "Nusa Focus Time", "Waktu fokus selesai! Istirahat sejenak ☕"],
+                    ["notify-send", "-a", "Bubu", "Bubu Focus Time", "Waktu fokus selesai! Istirahat sejenak ☕"],
                     env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority"))
                 )
 
@@ -1606,7 +1606,7 @@ class NusaNotch(Gtk.Window):
 
         def _worker():
             try:
-                system_prompt = self.settings.get("ai_system_prompt", "Kamu adalah asisten AI Nusa yang cerdas, ringkas, dan ramah di desktop Linux.")
+                system_prompt = self.settings.get("ai_system_prompt", "Kamu adalah asisten AI Bubu yang cerdas, ringkas, dan ramah di desktop Linux.")
                 msgs_to_send = [{"role": "system", "content": system_prompt}] + self.ai_messages[-6:]
                 reply = call_ai_api(base_url, api_key, model, msgs_to_send)
                 GLib.idle_add(self._on_ai_reply, reply)
@@ -1625,7 +1625,7 @@ class NusaNotch(Gtk.Window):
         if not self.is_expanded:
             preview = reply[:120] + "..." if len(reply) > 120 else reply
             subprocess.Popen([
-                "notify-send", "-a", "Nusa AI", "Nusa AI Agent", preview
+                "notify-send", "-a", "Bubu AI", "Bubu AI Agent", preview
             ], env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority")))
 
     # ─── Cairo Render Pipeline ──────────────────────────────────────
@@ -2305,14 +2305,14 @@ class NusaNotch(Gtk.Window):
         cr.restore()
 
 def main():
-    lock_file = open('/tmp/nusa-linux.lock', 'w')
+    lock_file = open('/tmp/bubu-linux.lock', 'w')
     try:
         fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
-        print("Nusa is already running.")
+        print("Bubu is already running.")
         sys.exit(0)
 
-    app = NusaNotch()
+    app = BubuNotch()
     Gtk.main()
 
 if __name__ == "__main__":

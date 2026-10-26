@@ -1,4 +1,4 @@
-# 🌸 Nusa for Linux
+# 🌸 Bubu for Linux
 
 > **The top of your screen, alive.**  
 > An open-source, living interactive notch for Linux desktop inspired by [Nusa](https://rama2555.github.io/nusa/).
@@ -8,7 +8,7 @@
 [![Python](https://img.shields.io/badge/Python-3-yellow.svg)]()
 [![RAM](https://img.shields.io/badge/RAM-~30%20MB-green.svg)]()
 
-Nusa turns the top edge of your Linux screen (right beneath the webcam) into an interactive notch that features a living companion mascot, music controls, focus timers, file stashing, and hydration tracking — then quietly gets out of the way.
+Bubu turns the top edge of your Linux screen (right beneath the webcam) into an interactive notch that features a living companion mascot, music controls, focus timers, file stashing, and hydration tracking — then quietly gets out of the way.
 
 ---
 
@@ -49,13 +49,13 @@ sudo apt install python3-gi gir1.2-gtk-3.0 libnotify-bin
 
 ### 2. Clone & Pasang
 ```bash
-git clone https://github.com/khoirulanamid/nusa-linux.git
-cd nusa-linux
+git clone https://github.com/khoirulanamid/bubu-linux.git
+cd bubu-linux
 chmod +x install.sh
 ./install.sh
 ```
 
-Selesai! Nusa akan langsung aktif di layar dan otomatis berjalan setiap kali kamu menyalakan laptop (*Autostart*).
+Selesai! Bubu akan langsung aktif di layar dan otomatis berjalan setiap kali kamu menyalakan laptop (*Autostart*).
 
 ---
 
@@ -65,19 +65,19 @@ Selesai! Nusa akan langsung aktif di layar dan otomatis berjalan setiap kali kam
    - Di tengah atas layar terlihat kapsul hitam minimalis menampilkan jam digital, mata maskot, dan status musik.
    - Area sekitarnya tembus klik (*click-through*), sehingga tidak mengganggu jendela aplikasi lain.
 2. **Arahkan Kursor (Hover):**
-   - Cukup arahkan mouse ke arah kapsul di bawah kamera, Nusa akan meluncur turun (*spring expand*) membuka kartu kontrol.
-   - Pindahkan mouse menjauh, Nusa akan otomatis menyusut kembali ke atas.
+   - Cukup arahkan mouse ke arah kapsul di bawah kamera, Bubu akan meluncur turun (*spring expand*) membuka kartu kontrol.
+   - Pindahkan mouse menjauh, Bubu akan otomatis menyusut kembali ke atas.
 3. **Seret File (Drag & Drop):**
    - Ambil file dari file manager (Nemo, Nautilus, dll.) dan seret ke tengah atas layar.
-   - Nusa akan otomatis terbuka ke tab **Shelf** untuk menyimpan filemu.
+   - Bubu akan otomatis terbuka ke tab **Shelf** untuk menyimpan filemu.
 
 ---
 
 ## 🗑️ Cara Uninstall
 
-Jika ingin menghapus instalasi Nusa:
+Jika ingin menghapus instalasi Bubu:
 ```bash
-cd nusa-linux
+cd bubu-linux
 ./uninstall.sh
 ```
 
