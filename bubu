@@ -43,6 +43,7 @@ import ssl
 import threading
 import subprocess
 import fcntl
+import re
 
 CONFIG_DIR = os.path.expanduser("~/.config/bubu")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -50,6 +51,34 @@ SHELF_FILE = os.path.join(CONFIG_DIR, "shelf.json")
 CHAT_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
+
+DEFAULT_AI_SYSTEM_PROMPT = """Kamu adalah Bubu AI Agent, asisten desktop cerdas di Linux Mint Cinnamon.
+Kamu memiliki kendali penuh untuk menjalankan perintah desktop dan sistem atas permintaan pengguna.
+
+ATURAN EKSEKUSI TINDAKAN:
+Jika pengguna meminta untuk membuka aplikasi, membuat folder/file, membuka URL, mengatur file, atau menjalankan perintah Linux apa pun, kamu WAJIB menyertakan tag aksi di baris terakhir responmu:
+[ACTION: bash <perintah_shell>]
+
+PANDUAN PERINTAH:
+1. Membuka Aplikasi:
+   - File Manager / Nemo: [ACTION: bash nemo ~ &] atau [ACTION: bash nemo ~/Downloads &]
+   - Browser / Chrome: [ACTION: bash google-chrome &] atau [ACTION: bash xdg-open https://... &]
+   - VS Code: [ACTION: bash code &] atau [ACTION: bash code <path> &]
+   - Terminal: [ACTION: bash x-terminal-emulator &]
+   - Text Editor: [ACTION: bash xed &]
+   - Kalkulator: [ACTION: bash gnome-calculator &]
+   - Settings: [ACTION: bash cinnamon-settings &]
+2. Manajemen File & Folder:
+   - Buat folder: [ACTION: bash mkdir -p ~/Desktop/NamaFolder]
+   - Buat file: [ACTION: bash touch ~/Desktop/catatan.txt]
+   - Buka file / folder: [ACTION: bash xdg-open <path> &]
+3. Utilitas Sistem:
+   - Screenshot: [ACTION: bash gnome-screenshot -i &]
+   - Cek info: [ACTION: bash df -h]
+
+Gaya Bahasa:
+- Berikan respon yang singkat, sigap, ramah, dan profesional dalam Bahasa Indonesia.
+- Jangan gunakan basa-basi panjang. Konfirmasi tindakan yang kamu lakukan."""
 
 DEFAULT_SETTINGS = {
     "mascot_enabled": True,
@@ -60,7 +89,7 @@ DEFAULT_SETTINGS = {
     "ai_base_url": "https://openrouter.ai/api/v1",
     "ai_api_key": "",
     "ai_model": "anthropic/claude-3.5-sonnet",
-    "ai_system_prompt": "Kamu adalah asisten AI Bubu yang cerdas, ringkas, dan ramah di desktop Linux. Berikan jawaban yang padat, akurat, dan langsung ke inti."
+    "ai_system_prompt": DEFAULT_AI_SYSTEM_PROMPT
 }
 
 def load_settings():
@@ -70,6 +99,10 @@ def load_settings():
                 data = json.load(f)
                 s = dict(DEFAULT_SETTINGS)
                 s.update(data)
+                # Auto-upgrade system prompt if it is the old prompt without actions
+                if "[ACTION:" not in s.get("ai_system_prompt", ""):
+                    s["ai_system_prompt"] = DEFAULT_AI_SYSTEM_PROMPT
+                    save_settings(s)
                 return s
         except Exception:
             pass
@@ -113,6 +146,78 @@ def save_chat(messages):
             json.dump(messages[-20:], f, indent=2)
     except Exception as e:
         print("[Bubu] Error saving chat:", e)
+
+def execute_desktop_action(cmd_str):
+    cmd_str = (cmd_str or "").strip()
+    if not cmd_str:
+        return False, "Perintah kosong"
+
+    blocked_patterns = [
+        r"rm\s+-rf\s+/\s*$",
+        r"rm\s+-rf\s+/\*",
+        r":\(\)\s*\{\s*:\|:&\s*\};:",
+        r">\s*/dev/sd",
+        r"mkfs\.",
+        r"dd\s+if="
+    ]
+    for pat in blocked_patterns:
+        if re.search(pat, cmd_str, re.IGNORECASE):
+            print(f"[Bubu Action] Blocked dangerous command: {cmd_str}")
+            return False, f"Diblokir demi keamanan: {cmd_str}"
+
+    env = dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority"))
+    try:
+        subprocess.Popen(
+            cmd_str,
+            shell=True,
+            env=env,
+            cwd=os.path.expanduser("~"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        print(f"[Bubu Action] Executed successfully: {cmd_str}")
+        return True, cmd_str
+    except Exception as e:
+        print(f"[Bubu Action] Execution error: {e}")
+        return False, str(e)
+
+def try_fallback_desktop_command(text):
+    t = text.lower().strip()
+    if any(t.startswith(p) for p in ("buka ", "open ", "launch ", "jalankan ")):
+        words = t.split(" ", 1)
+        if len(words) > 1:
+            target = words[1].strip()
+            if target in ("nemo", "file manager", "filemanager", "files", "berkas", "explorer"):
+                return "nemo ~ &", "Membuka File Manager (Nemo)."
+            elif target in ("chrome", "google chrome", "google-chrome", "browser"):
+                return "google-chrome &", "Membuka browser Google Chrome."
+            elif target in ("vs code", "vscode", "code"):
+                return "code &", "Membuka Visual Studio Code."
+            elif target in ("terminal", "konsole", "bash"):
+                return "x-terminal-emulator &", "Membuka Terminal."
+            elif target in ("kalkulator", "calculator", "calc"):
+                return "gnome-calculator &", "Membuka Kalkulator."
+            elif target in ("text editor", "editor", "xed", "gedit", "notepad"):
+                return "xed &", "Membuka Text Editor."
+            elif target in ("settings", "pengaturan", "setting"):
+                return "cinnamon-settings &", "Membuka Pengaturan Cinnamon."
+            elif target in ("downloads", "download", "unduhan"):
+                return "nemo ~/Downloads &", "Membuka folder Downloads."
+            elif target in ("desktop", "meja kerja"):
+                return "nemo ~/Desktop &", "Membuka folder Desktop."
+            elif target in ("documents", "dokumen"):
+                return "nemo ~/Documents &", "Membuka folder Dokumen."
+            elif target.startswith(("http://", "https://", "www.")):
+                url = target if target.startswith("http") else f"https://{target}"
+                return f"xdg-open {url} &", f"Membuka {url} di browser."
+    elif any(t.startswith(p) for p in ("buat folder ", "bikin folder ", "mkdir ")):
+        name = t.replace("buat folder", "").replace("bikin folder", "").replace("mkdir", "").strip()
+        name = name.replace("di desktop", "").replace("di ~/desktop", "").strip()
+        name = name.strip("\"' ")
+        if name:
+            return f"mkdir -p ~/Desktop/'{name}'", f"Membuat folder '{name}' di Desktop."
+    return None, None
 
 def format_duration(seconds):
     if seconds <= 0:
@@ -892,7 +997,7 @@ class BubuNotch(Gtk.Window):
             placeholder_box.pack_start(title_lbl, False, False, 0)
 
             sub_lbl = Gtk.Label()
-            sub_lbl.set_markup("<span size='small' color='#9ca3af'>Tanyakan apa saja di bawah, atau klik ⚙ untuk setelan API.</span>")
+            sub_lbl.set_markup("<span size='small' color='#9ca3af'>Tanya apa saja, atau perintahkan buka aplikasi, buat folder, dll.</span>")
             placeholder_box.pack_start(sub_lbl, False, False, 0)
 
             self.chat_box.pack_start(placeholder_box, True, True, 0)
@@ -933,6 +1038,21 @@ class BubuNotch(Gtk.Window):
                 content_lbl.set_xalign(0)
                 content_lbl.set_max_width_chars(52)
                 msg_container.pack_start(content_lbl, False, False, 0)
+
+                # Action execution badge
+                action_cmd = msg.get("action")
+                if action_cmd:
+                    action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                    action_box.set_margin_top(2)
+                    action_box.set_margin_bottom(2)
+                    action_lbl = Gtk.Label()
+                    escaped_cmd = GLib.markup_escape_text(action_cmd)
+                    action_lbl.set_markup(f"<span size='x-small' color='#9ca3af'>⚡ <b>Eksekusi:</b></span> <span size='x-small' color='#34d399'><tt>{escaped_cmd}</tt></span>")
+                    action_lbl.set_xalign(0)
+                    action_lbl.set_line_wrap(True)
+                    action_lbl.set_selectable(True)
+                    action_box.pack_start(action_lbl, False, False, 0)
+                    msg_container.pack_start(action_box, False, False, 0)
 
                 self.chat_box.pack_start(msg_container, False, False, 0)
 
@@ -1586,6 +1706,21 @@ class BubuNotch(Gtk.Window):
         save_chat(self.ai_messages)
         self.rebuild_chat_ui()
 
+        # Check for direct local command shortcuts like /run <cmd> or /sh <cmd>
+        if text.startswith(("/run ", "/sh ", "/bash ", "/cmd ")):
+            raw_cmd = text.split(" ", 1)[1].strip()
+            ok, res = execute_desktop_action(raw_cmd)
+            if ok:
+                reply = f"Perintah shell berhasil dijalankan: `{raw_cmd}`"
+                self.ai_messages.append({"role": "assistant", "content": reply, "action": raw_cmd})
+            else:
+                reply = f"⚠️ Gagal mengeksekusi: {res}"
+                self.ai_messages.append({"role": "assistant", "content": reply})
+            save_chat(self.ai_messages)
+            self.rebuild_chat_ui()
+            self.queue_draw()
+            return
+
         api_key = self.settings.get("ai_api_key", "").strip()
         base_url = self.settings.get("ai_base_url", "https://openrouter.ai/api/v1").strip()
         model = self.settings.get("ai_model", "anthropic/claude-3.5-sonnet").strip()
@@ -1606,24 +1741,50 @@ class BubuNotch(Gtk.Window):
 
         def _worker():
             try:
-                system_prompt = self.settings.get("ai_system_prompt", "Kamu adalah asisten AI Bubu yang cerdas, ringkas, dan ramah di desktop Linux.")
+                system_prompt = self.settings.get("ai_system_prompt", DEFAULT_AI_SYSTEM_PROMPT)
                 msgs_to_send = [{"role": "system", "content": system_prompt}] + self.ai_messages[-6:]
                 reply = call_ai_api(base_url, api_key, model, msgs_to_send)
                 GLib.idle_add(self._on_ai_reply, reply)
             except Exception as e:
                 err_text = str(e)
+                fallback_cmd, fallback_msg = try_fallback_desktop_command(text)
+                if fallback_cmd:
+                    ok, _ = execute_desktop_action(fallback_cmd)
+                    if ok:
+                        reply_fallback = f"{fallback_msg}\n[ACTION: bash {fallback_cmd}]"
+                        GLib.idle_add(self._on_ai_reply, reply_fallback)
+                        return
                 GLib.idle_add(self._on_ai_reply, f"⚠️ Gagal: {err_text}")
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_ai_reply(self, reply):
         self.ai_loading = False
-        self.ai_messages.append({"role": "assistant", "content": reply})
+
+        # Extract [ACTION: bash ...] or [ACTION: ...] tags
+        action_matches = re.findall(r'\[ACTION:\s*(?:bash\s+)?(.*?)\]', reply, flags=re.DOTALL | re.IGNORECASE)
+        clean_reply = re.sub(r'\[ACTION:\s*(?:bash\s+)?.*?\]', '', reply, flags=re.DOTALL | re.IGNORECASE).strip()
+
+        executed_actions = []
+        for act in action_matches:
+            act = act.strip()
+            if act:
+                ok, _ = execute_desktop_action(act)
+                if ok:
+                    executed_actions.append(act)
+
+        msg_obj = {"role": "assistant", "content": clean_reply}
+        if executed_actions:
+            msg_obj["action"] = " && ".join(executed_actions)
+
+        self.ai_messages.append(msg_obj)
         save_chat(self.ai_messages)
         self.rebuild_chat_ui()
         self.queue_draw()
         if not self.is_expanded:
-            preview = reply[:120] + "..." if len(reply) > 120 else reply
+            preview = clean_reply[:120] + "..." if len(clean_reply) > 120 else clean_reply
+            if executed_actions:
+                preview = f"⚡ {executed_actions[0]}\n" + preview
             subprocess.Popen([
                 "notify-send", "-a", "Bubu AI", "Bubu AI Agent", preview
             ], env=dict(os.environ, DISPLAY=":0", XAUTHORITY=os.path.expanduser("~/.Xauthority")))
