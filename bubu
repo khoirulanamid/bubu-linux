@@ -44,6 +44,7 @@ import threading
 import subprocess
 import fcntl
 import re
+import base64
 
 CONFIG_DIR = os.path.expanduser("~/.config/bubu")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -334,6 +335,63 @@ def call_ai_api(base_url, api_key, model, messages, max_tokens=1024):
         raw_text = resp.read().decode("utf-8")
 
     return parse_llm_response(raw_text, is_anthropic_direct)
+
+def transcribe_audio_file(wav_path, base_url, api_key):
+    try:
+        with open(wav_path, 'rb') as f:
+            audio_b64 = base64.b64encode(f.read()).decode('utf-8')
+    except Exception as e:
+        print("[Bubu Voice] Error reading wav file:", e)
+        return ""
+
+    base_url = (base_url or "https://openrouter.ai/api/v1").rstrip("/")
+    url = f"{base_url}/chat/completions" if not base_url.endswith("/chat/completions") else base_url
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    model_name = "ag/gemini-3.8-flash-high"
+    if "openrouter" in base_url.lower():
+        model_name = "google/gemini-flash-1.5"
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Transkripsikan rekaman audio bahasa Indonesia ini secara persis dan akurat. HANYA cetak teks ucapannya saja tanpa tanda kutip, tanpa penjelasan, dan tanpa kata pengantar apa pun."
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_b64,
+                            "format": "wav"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 150,
+        "stream": False
+    }
+
+    ctx = ssl.create_default_context()
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+        raw_text = resp.read().decode("utf-8")
+
+    parsed = parse_llm_response(raw_text, False)
+    return parsed.strip().strip('"\'“”')
 
 # ─── AI Settings Dialog Window ──────────────────────────────────────
 class AISettingsDialog(Gtk.Window):
@@ -829,6 +887,9 @@ class BubuNotch(Gtk.Window):
         # AI Agent Chat Data & State
         self.ai_messages = load_chat()
         self.ai_loading = False
+        self.is_recording = False
+        self.rec_proc = None
+        self.rec_pulse = 0.0
 
         # Pomodoro
         self.pomo_running = False
@@ -890,7 +951,7 @@ class BubuNotch(Gtk.Window):
         self.chat_entry = Gtk.Entry()
         self.chat_entry.set_no_show_all(True)
         self.chat_entry.set_placeholder_text("Tanya apa saja ke AI...")
-        self.chat_entry.set_size_request(self.EXP_W - 80, 28)
+        self.chat_entry.set_size_request(self.EXP_W - 114, 28)
         self.chat_entry.connect("activate", lambda e: self.on_send_chat())
         self.fixed.put(self.chat_entry, 22, 196)
         self.chat_entry.hide()
@@ -1285,10 +1346,12 @@ class BubuNotch(Gtk.Window):
     def on_fast_tick(self):
         now = time.time()
 
-        # Animate Audio Visualizer Candle when playing or AI is thinking
+        # Animate Audio Visualizer Candle when playing, AI is thinking, or recording voice
         is_playing = (self.active_player and self.active_player.get('status') == 'Playing')
-        if is_playing or self.ai_loading:
+        if is_playing or self.ai_loading or self.is_recording:
             self.visualizer_phase = (self.visualizer_phase + 0.18) % (math.pi * 20.0)
+            if self.is_recording:
+                self.rec_pulse = (self.rec_pulse + 0.15) % (math.pi * 2.0)
             self.queue_draw()
             if self.floating_player and self.floating_player.get_visible():
                 self.floating_player.queue_draw()
@@ -1650,8 +1713,13 @@ class BubuNotch(Gtk.Window):
                 self.queue_draw()
                 return True
 
-            # 2c. Send Button ➤ Click
-            if px + cur_w - 54 <= x <= px + cur_w - 18 and 190 <= y <= 228:
+            # 2c. Microphone Button 🎙 Click
+            if px + cur_w - 86 <= x <= px + cur_w - 56 and 190 <= y <= 228:
+                self.toggle_voice_recording()
+                return True
+
+            # 2d. Send Button ➤ Click
+            if px + cur_w - 52 <= x <= px + cur_w - 18 and 190 <= y <= 228:
                 self.on_send_chat()
                 return True
 
@@ -1694,21 +1762,107 @@ class BubuNotch(Gtk.Window):
         dialog = AISettingsDialog(self.settings, _on_save)
         dialog.show_all()
 
-    def on_send_chat(self):
-        text = self.chat_entry.get_text().strip()
+    def toggle_voice_recording(self):
+        if not getattr(self, 'is_recording', False):
+            # Start recording
+            self.is_recording = True
+            self.rec_pulse = 0.0
+            self.chat_entry.set_text("")
+            self.chat_entry.set_placeholder_text("🔴 Mendengarkan... Katakan perintahmu lalu klik ⏹")
+            self.queue_draw()
+
+            wav_path = "/tmp/bubu_voice.wav"
+            if os.path.exists(wav_path):
+                try:
+                    os.remove(wav_path)
+                except Exception:
+                    pass
+
+            cmd = ["arecord", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", wav_path]
+            try:
+                self.rec_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print("[Bubu Voice] Started recording to", wav_path)
+            except Exception as e:
+                print("[Bubu Voice] arecord error:", e)
+                self.is_recording = False
+                self.chat_entry.set_placeholder_text("⚠️ Gagal mengakses mikrofon (arecord)")
+                self.queue_draw()
+        else:
+            # Stop recording and process
+            self.is_recording = False
+            self.chat_entry.set_placeholder_text("Tanya apa saja ke AI...")
+            self.queue_draw()
+
+            if hasattr(self, 'rec_proc') and self.rec_proc:
+                try:
+                    self.rec_proc.terminate()
+                    self.rec_proc.wait(timeout=1.5)
+                except Exception:
+                    try:
+                        self.rec_proc.kill()
+                    except Exception:
+                        pass
+                self.rec_proc = None
+
+            wav_path = "/tmp/bubu_voice.wav"
+            if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
+                print("[Bubu Voice] Audio file empty or missing")
+                return
+
+            self.ai_loading = True
+            self.rebuild_chat_ui()
+            self.queue_draw()
+
+            def _process_voice():
+                try:
+                    base_url = self.settings.get("ai_base_url", "https://openrouter.ai/api/v1").strip()
+                    api_key = self.settings.get("ai_api_key", "").strip()
+                    transcribed = transcribe_audio_file(wav_path, base_url, api_key)
+                    if transcribed:
+                        print(f"[Bubu Voice] Transcribed: {transcribed}")
+                        GLib.idle_add(self._on_voice_transcribed, transcribed)
+                    else:
+                        GLib.idle_add(self._on_voice_error, "Suara tidak terdengar jelas.")
+                except Exception as e:
+                    GLib.idle_add(self._on_voice_error, f"Gagal transkripsi suara: {e}")
+
+            threading.Thread(target=_process_voice, daemon=True).start()
+
+    def _on_voice_transcribed(self, text):
+        self.ai_loading = False
+        self.on_send_chat(text=text, is_voice=True)
+
+    def _on_voice_error(self, err_msg):
+        self.ai_loading = False
+        self.ai_messages.append({"role": "assistant", "content": f"⚠️ {err_msg}"})
+        save_chat(self.ai_messages)
+        self.rebuild_chat_ui()
+        self.queue_draw()
+
+    def on_send_chat(self, text=None, is_voice=False):
+        if text is None:
+            text = self.chat_entry.get_text().strip()
+            self.chat_entry.set_text("")
+        else:
+            text = text.strip()
+
         if not text:
             return
-        if self.ai_loading:
+        if self.ai_loading and not is_voice:
             return
 
-        self.chat_entry.set_text("")
-        self.ai_messages.append({"role": "user", "content": text})
+        display_text = text
+        if is_voice and not text.startswith("🎤"):
+            display_text = f"🎤 {text}"
+
+        self.ai_messages.append({"role": "user", "content": display_text})
         save_chat(self.ai_messages)
         self.rebuild_chat_ui()
 
         # Check for direct local command shortcuts like /run <cmd> or /sh <cmd>
-        if text.startswith(("/run ", "/sh ", "/bash ", "/cmd ")):
-            raw_cmd = text.split(" ", 1)[1].strip()
+        cmd_candidate = text[2:].strip() if text.startswith("🎤") else text
+        if cmd_candidate.startswith(("/run ", "/sh ", "/bash ", "/cmd ")):
+            raw_cmd = cmd_candidate.split(" ", 1)[1].strip()
             ok, res = execute_desktop_action(raw_cmd)
             if ok:
                 reply = f"Perintah shell berhasil dijalankan: `{raw_cmd}`"
@@ -1747,7 +1901,7 @@ class BubuNotch(Gtk.Window):
                 GLib.idle_add(self._on_ai_reply, reply)
             except Exception as e:
                 err_text = str(e)
-                fallback_cmd, fallback_msg = try_fallback_desktop_command(text)
+                fallback_cmd, fallback_msg = try_fallback_desktop_command(cmd_candidate)
                 if fallback_cmd:
                     ok, _ = execute_desktop_action(fallback_cmd)
                     if ok:
@@ -2338,10 +2492,58 @@ class BubuNotch(Gtk.Window):
         cr.stroke()
         cr.restore()
 
-        # 3. Send Button at px + w - 50, Y = 196 (28x28)
+        # 3. Microphone Button at px + w - 82, Y = 196 (28x28)
         cr.save()
-        sb_x, sb_y, sb_s = px + w - 50, 196, 28
-        cr.rectangle(sb_x, sb_y, sb_s, sb_s)
+        mb_x, mb_y, mb_s = px + w - 82, 196, 28
+        cr.new_sub_path()
+        mr = 6.0
+        cr.arc(mb_x + mb_s - mr, mb_y + mr, mr, -math.pi/2, 0)
+        cr.arc(mb_x + mb_s - mr, mb_y + mb_s - mr, mr, 0, math.pi/2)
+        cr.arc(mb_x + mr, mb_y + mb_s - mr, mr, math.pi/2, math.pi)
+        cr.arc(mb_x + mr, mb_y + mr, mr, math.pi, 3*math.pi/2)
+        cr.close_path()
+
+        if getattr(self, 'is_recording', False):
+            pulse = 0.5 + 0.5 * math.sin(getattr(self, 'rec_pulse', 0.0))
+            cr.set_source_rgba(0.90, 0.18 + 0.15 * pulse, 0.18, alpha * 0.98)
+            cr.fill_preserve()
+            cr.set_source_rgba(1.0, 0.45, 0.45, alpha * 0.85)
+            cr.set_line_width(1.2)
+            cr.stroke()
+
+            layout.set_width(-1)
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans Bold 9"))
+            layout.set_text("⏹", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.98)
+            cr.move_to(mb_x + (mb_s - tw) / 2.0, mb_y + (mb_s - th) / 2.0)
+            PangoCairo.show_layout(cr, layout)
+        else:
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.07)
+            cr.fill_preserve()
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.12)
+            cr.set_line_width(1.0)
+            cr.stroke()
+
+            layout.set_width(-1)
+            layout.set_font_description(Pango.FontDescription("Ubuntu, Sans 10"))
+            layout.set_text("🎙", -1)
+            tw, th = layout.get_pixel_size()
+            cr.set_source_rgba(0.85, 0.88, 0.95, alpha * 0.90)
+            cr.move_to(mb_x + (mb_s - tw) / 2.0, mb_y + (mb_s - th) / 2.0)
+            PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+        # 4. Send Button at px + w - 48, Y = 196 (28x28)
+        cr.save()
+        sb_x, sb_y, sb_s = px + w - 48, 196, 28
+        cr.new_sub_path()
+        sr = 6.0
+        cr.arc(sb_x + sb_s - sr, sb_y + sr, sr, -math.pi/2, 0)
+        cr.arc(sb_x + sb_s - sr, sb_y + sb_s - sr, sr, 0, math.pi/2)
+        cr.arc(sb_x + sr, sb_y + sb_s - sr, sr, math.pi/2, math.pi)
+        cr.arc(sb_x + sr, sb_y + sr, sr, math.pi, 3*math.pi/2)
+        cr.close_path()
         cr.set_source_rgba(0.96, 0.97, 0.99, alpha * 0.96)
         cr.fill()
 
