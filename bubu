@@ -839,11 +839,16 @@ class BubuNotch(Gtk.Window):
         self.set_skip_pager_hint(True)
         self.stick()
 
-        # Proportions
+        # The compact state is deliberately narrower than the open panel so the
+        # webcam-bezel silhouette stays quiet until the user clicks it.
         self.IDLE_W = 166
         self.IDLE_H = 30
         self.EXP_W = 430
         self.EXP_H = 240
+        self.TOP_GAP = 0
+        self.SHELL = (0.05, 0.05, 0.06)
+        self.SHELL_EDGE = (1.0, 1.0, 1.0)
+        self.SHELL_ACCENT = (0.36, 0.68, 1.0)
 
         # Start physically as the exact 166x30 pill
         self.set_default_size(self.IDLE_W, self.IDLE_H)
@@ -874,9 +879,11 @@ class BubuNotch(Gtk.Window):
         self.ai_scroll_y = 0.0
         self.ai_max_scroll = 0.0
 
-        # Tabs: 0: Music, 1: Agent AI, 2: Focus, 3: Shelf
+        # Tabs: 0: Music, 1: Agent, 2: Focus, 3: Shelf
         self.active_tab = 0
-        self.tabs = ["Music", "Agent AI", "Focus", "Shelf"]
+        self.tabs = ["Music", "Agent", "Focus", "Shelf"]
+        self.pointer_x = float("nan")
+        self.pointer_y = float("nan")
 
         # Controllers & Data
         self.settings = load_settings()
@@ -910,6 +917,7 @@ class BubuNotch(Gtk.Window):
         if visual:
             self.set_visual(visual)
         self.set_app_paintable(True)
+        self.set_opacity(1.0)
 
         # Connect GDK events
         self.connect("draw", self.on_draw)
@@ -917,13 +925,17 @@ class BubuNotch(Gtk.Window):
             Gdk.EventMask.ENTER_NOTIFY_MASK |
             Gdk.EventMask.LEAVE_NOTIFY_MASK |
             Gdk.EventMask.BUTTON_PRESS_MASK |
+            Gdk.EventMask.POINTER_MOTION_MASK |
             Gdk.EventMask.SCROLL_MASK |
             Gdk.EventMask.SMOOTH_SCROLL_MASK
         )
         self.connect("enter-notify-event", self.on_enter)
         self.connect("leave-notify-event", self.on_leave)
         self.connect("button-press-event", self.on_button_press)
+        self.connect("motion-notify-event", self.on_motion)
         self.connect("scroll-event", self.on_scroll)
+        self.connect("key-press-event", self.on_key_press)
+        self.set_can_focus(True)
 
         # Drag & drop setup
         self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
@@ -935,6 +947,8 @@ class BubuNotch(Gtk.Window):
         # Overlaid GTK Entry and Chat Scroll for AI Chat
         self.fixed = Gtk.Fixed()
         self.add(self.fixed)
+        self.fixed.set_no_show_all(True)
+        self.fixed.hide()
 
         self.chat_scroll = Gtk.ScrolledWindow()
         self.chat_scroll.set_no_show_all(True)
@@ -953,6 +967,7 @@ class BubuNotch(Gtk.Window):
         self.chat_entry.set_placeholder_text("Tanya apa saja ke AI...")
         self.chat_entry.set_size_request(self.EXP_W - 114, 28)
         self.chat_entry.connect("activate", lambda e: self.on_send_chat())
+        self.chat_entry.connect("key-press-event", self.on_key_press)
         self.fixed.put(self.chat_entry, 22, 196)
         self.chat_entry.hide()
 
@@ -1017,9 +1032,12 @@ class BubuNotch(Gtk.Window):
         GLib.timeout_add(30, self.on_fast_tick)
 
         self.show_all()
+        self.fixed.hide()
+        self.chat_scroll.hide()
         self.chat_entry.hide()
         self.resize(self.IDLE_W, self.IDLE_H)
         self.reposition(self.IDLE_W)
+        GLib.idle_add(self.queue_draw)
 
     def get_monitor_geometry(self):
         display = Gdk.Display.get_default()
@@ -1034,8 +1052,45 @@ class BubuNotch(Gtk.Window):
         y = geom.y
         self.move(x, y)
 
+    def point_inside(self, x, y, w, h):
+        return x <= self.pointer_x <= x + w and y <= self.pointer_y <= y + h
+
+    def on_motion(self, widget, event):
+        self.pointer_x = event.x
+        self.pointer_y = event.y
+        self.queue_draw()
+        return False
+
+    def on_key_press(self, widget, event):
+        """Keep keyboard navigation useful without changing the desktop focus policy."""
+        if not self.is_expanded:
+            return False
+        key = Gdk.keyval_name(event.keyval) or ""
+        state = event.state & Gtk.accelerator_get_default_mod_mask()
+        if key == "Escape":
+            self.retract()
+            return True
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            if key in ("Left", "KP_Left"):
+                self.active_tab = (self.active_tab - 1) % len(self.tabs)
+                self.update_widget_visibility()
+                self.queue_draw()
+                return True
+            if key in ("Right", "KP_Right"):
+                self.active_tab = (self.active_tab + 1) % len(self.tabs)
+                self.update_widget_visibility()
+                self.queue_draw()
+                return True
+        if key in ("1", "2", "3", "4"):
+            self.active_tab = min(len(self.tabs) - 1, int(key) - 1)
+            self.update_widget_visibility()
+            self.queue_draw()
+            return True
+        return False
+
     def update_widget_visibility(self):
         if self.is_expanded and self.active_tab == 1:
+            self.fixed.show()
             self.chat_scroll.show()
             self.chat_box.show_all()
             self.chat_entry.show()
@@ -1044,6 +1099,7 @@ class BubuNotch(Gtk.Window):
         else:
             self.chat_scroll.hide()
             self.chat_entry.hide()
+            self.fixed.hide()
 
     def rebuild_chat_ui(self):
         for child in self.chat_box.get_children():
@@ -1258,6 +1314,8 @@ class BubuNotch(Gtk.Window):
 
     # ─── Mouse Event Handling (Auto-close on pointer leave) ──────────
     def on_enter(self, widget, event):
+        self.pointer_x = event.x
+        self.pointer_y = event.y
         self.last_hover_time = time.time()
         self.last_interaction_time = time.time()
         self.is_hovered = True
@@ -1274,6 +1332,8 @@ class BubuNotch(Gtk.Window):
         return True
 
     def on_leave(self, widget, event):
+        self.pointer_x = float("nan")
+        self.pointer_y = float("nan")
         self.last_hover_time = time.time()
         self.is_hovered = False
         if self.is_expanded and not self.drag_hover:
@@ -1996,8 +2056,8 @@ class BubuNotch(Gtk.Window):
 
     # ─── Cairo Render Pipeline ──────────────────────────────────────
     def on_draw(self, widget, cr):
-        cr.set_source_rgba(0, 0, 0, 0)
         cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
 
@@ -2008,7 +2068,6 @@ class BubuNotch(Gtk.Window):
             cur_w = float(self.IDLE_W)
             cur_h = float(self.IDLE_H)
             cur_r = 15.0
-
             self.draw_capsule_shape(cr, px, py, cur_w, cur_h, cur_r, 0.0)
             self.draw_idle_elements(cr, cur_w / 2.0, cur_h / 2.0, 1.0)
         else:
@@ -2019,7 +2078,6 @@ class BubuNotch(Gtk.Window):
             cur_r = 15.0 + min(1.0, p) * 11.0
             px = (self.EXP_W - cur_w) / 2.0
             py = 0.0
-
             self.draw_capsule_shape(cr, px, py, cur_w, cur_h, cur_r, p)
 
             # Layered transition
@@ -2040,21 +2098,44 @@ class BubuNotch(Gtk.Window):
         return False
 
     def draw_capsule_shape(self, cr, px, py, w, h, r, p):
+        """Draw one morphing outline, with FathNotch-style top ears."""
+        p = max(0.0, min(1.0, p))
+        ear = (8.0 + 3.0 * p) * (1.0 - p)
+        top_r = min(10.0 * p, w / 2.0, h / 2.0)
+        body_left = px + ear
+        body_right = px + w - ear
+        bottom = py + h
+        bottom_r = min(r, (body_right - body_left) / 2.0, max(0.0, h - max(ear, top_r)))
+
         cr.new_path()
-        cr.new_sub_path()
-        cr.move_to(px, 0)
-        cr.line_to(px + w, 0)
-        cr.line_to(px + w, h - r)
-        cr.arc(px + w - r, h - r, r, 0, math.pi / 2)
-        cr.line_to(px + r, h)
-        cr.arc(px + r, h - r, r, math.pi / 2, math.pi)
+        if ear > 0.2:
+            cr.move_to(px - ear, py)
+            cr.line_to(px, py)
+            cr.line_to(px + w, py)
+            cr.line_to(px + w + ear, py)
+            cr.arc(px + w, py + ear, ear, -math.pi / 2.0, 0)
+        else:
+            cr.move_to(px + top_r, py)
+            cr.line_to(px + w - top_r, py)
+            cr.arc(px + w - top_r, py + top_r, top_r, -math.pi / 2.0, 0)
+        cr.line_to(body_right, bottom - bottom_r)
+        if bottom_r > 0.1:
+            cr.arc(body_right - bottom_r, bottom - bottom_r, bottom_r, 0, math.pi / 2.0)
+        cr.line_to(body_left + bottom_r, bottom)
+        if bottom_r > 0.1:
+            cr.arc(body_left + bottom_r, bottom - bottom_r, bottom_r, math.pi / 2.0, math.pi)
+        cr.line_to(body_left, py + max(ear, top_r))
+        if ear > 0.2:
+            cr.curve_to(body_left, py + ear * 0.55, px + ear * 0.45, py, px, py)
+        else:
+            cr.arc(px + top_r, py + top_r, top_r, math.pi, 3.0 * math.pi / 2.0)
         cr.close_path()
 
-        # Solid Matte Obsidian Surface (No gradients, blends with laptop bezel)
-        cr.set_source_rgba(0.05, 0.05, 0.06, 0.98) # #0d0d0f
+        # Matte obsidian continues the physical bezel instead of using a gradient.
+        cr.set_source_rgba(0.05, 0.05, 0.06, 0.98)
         cr.fill_preserve()
 
-        # Precision 1px Hairline Hardware Seam
+        # A single hairline seam makes the edge legible without looking luminous.
         border_alpha = 0.16 if (self.is_hovered and not self.is_expanded) else 0.09
         cr.set_source_rgba(1.0, 1.0, 1.0, border_alpha)
         cr.set_line_width(1.0)
