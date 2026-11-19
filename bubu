@@ -1186,6 +1186,12 @@ class BubuNotch(Gtk.Window):
         self.ensure_animation()
         self.update_widget_visibility()
 
+        # Keep the notch open only while the pointer is over it.  The
+        # watchdog covers fast X11 pointer crossings where LeaveNotify can
+        # occasionally be dropped.
+        if self.watchdog_id == 0:
+            self.watchdog_id = GLib.timeout_add(150, self.check_pointer_watchdog)
+
     def retract(self):
         self.cancel_retract()
         if not self.is_expanded:
@@ -1208,10 +1214,49 @@ class BubuNotch(Gtk.Window):
             GLib.source_remove(self.retract_timer)
             self.retract_timer = None
 
-    def check_pointer_watchdog(self):
-        return False
+    def _pointer_is_inside(self):
+        """Return True/False, or None when the compositor hides pointer coords."""
+        try:
+            display = Gdk.Display.get_default()
+            seat = display.get_default_seat() if display else None
+            pointer = seat.get_pointer() if seat else None
+            if not pointer:
+                return None
+            _, px, py = pointer.get_position()
+            win_x, win_y = self.get_position()
+            allocation = self.get_allocation()
+            # A tiny tolerance prevents a border crossing from closing it
+            # before the pointer has fully left the window.
+            return (
+                win_x - 2 <= px <= win_x + allocation.width + 2 and
+                win_y - 2 <= py <= win_y + allocation.height + 2
+            )
+        except Exception:
+            # Wayland may hide global pointer coordinates. The enter/leave
+            # state remains a safe fallback in that case.
+            return None
 
-    # ─── Mouse Event Handling (Manual Click Only) ───────────────────
+    def _schedule_pointer_retract(self, delay_ms=240):
+        if not self.is_expanded or self.drag_hover:
+            return
+        self.cancel_retract()
+        self.retract_timer = GLib.timeout_add(delay_ms, self._do_retract)
+
+    def check_pointer_watchdog(self):
+        """Auto-collapse after the pointer leaves, even if LeaveNotify is lost."""
+        if not self.is_expanded:
+            self.watchdog_id = 0
+            return False
+        if self.drag_hover:
+            return True
+        inside = self._pointer_is_inside()
+        if inside is True or (inside is None and self.is_hovered):
+            self.cancel_retract()
+        elif inside is False and not self.retract_timer:
+            self._schedule_pointer_retract()
+        return True
+
+    # ─── Mouse Event Handling (Auto-close on pointer leave) ──────────
     def on_enter(self, widget, event):
         self.last_hover_time = time.time()
         self.last_interaction_time = time.time()
@@ -1231,6 +1276,9 @@ class BubuNotch(Gtk.Window):
     def on_leave(self, widget, event):
         self.last_hover_time = time.time()
         self.is_hovered = False
+        if self.is_expanded and not self.drag_hover:
+            # Let the spring finish before shrinking back to the idle pill.
+            self._schedule_pointer_retract(240)
         display = Gdk.Display.get_default()
         win = self.get_window()
         if win and display:
@@ -1268,12 +1316,15 @@ class BubuNotch(Gtk.Window):
 
     def on_drag_leave(self, widget, context, time_val):
         if self.drag_hover:
+            self.drag_hover = False
             self.cancel_retract()
             self.retract_timer = GLib.timeout_add(450, self._do_retract)
 
     def _do_retract(self):
-        self.retract()
         self.retract_timer = None
+        inside = self._pointer_is_inside()
+        if self.is_expanded and not self.drag_hover and (inside is False or (inside is None and not self.is_hovered)):
+            self.retract()
         return False
 
     def on_drag_drop(self, widget, context, x, y, data, info, time_val):
