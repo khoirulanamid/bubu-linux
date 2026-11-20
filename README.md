@@ -64,9 +64,9 @@ Selesai! Bubu akan langsung aktif di layar dan otomatis berjalan setiap kali kam
 1. **Diam (Idle):**
    - Di tengah atas layar terlihat kapsul hitam minimalis menampilkan jam digital, mata maskot, dan status musik.
    - Area sekitarnya tembus klik (*click-through*), sehingga tidak mengganggu jendela aplikasi lain.
-2. **Arahkan Kursor (Hover):**
-   - Cukup arahkan mouse ke arah kapsul di bawah kamera, Bubu akan meluncur turun (*spring expand*) membuka kartu kontrol.
-   - Pindahkan mouse menjauh, Bubu akan otomatis menyusut kembali ke atas.
+2. **Klik Kapsul:**
+   - Klik kapsul di bawah kamera untuk membuka kartu kontrol dengan animasi *spring expand*.
+   - Pindahkan mouse menjauh, Bubu akan otomatis menyusut kembali ke atas. `Escape` juga menutup panel expanded.
 3. **Seret File (Drag & Drop):**
    - Ambil file dari file manager (Nemo, Nautilus, dll.) dan seret ke tengah atas layar.
    - Bubu akan otomatis terbuka ke tab **Shelf** untuk menyimpan filemu.
@@ -84,7 +84,7 @@ cd bubu-linux
 ---
 
 ## 💙 Penghargaan & Inspirasi
-Desain dan konsep terinspirasi dari karya asli [Nusa by Rama](https://rama2555.github.io/nusa/).
+Desain dan konsep terinspirasi dari karya asli [Nusa by Rama](https://rama2555.github.io/nusa/) dan interaksi [FathNotch](https://github.com/CFathurrohman/FathNotch). FathNotch dipakai sebagai referensi desain dan perilaku, bukan sebagai binary Windows atau dependency Wine. Implementasi Bubu tetap native GTK/Cairo Linux.
 
 ## 📜 Lisensi
 Proyek ini dilisensikan di bawah [MIT License](LICENSE).

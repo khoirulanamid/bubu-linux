@@ -2131,12 +2131,12 @@ class BubuNotch(Gtk.Window):
             cr.arc(px + top_r, py + top_r, top_r, math.pi, 3.0 * math.pi / 2.0)
         cr.close_path()
 
-        # Matte obsidian continues the physical bezel instead of using a gradient.
-        cr.set_source_rgba(0.05, 0.05, 0.06, 0.98)
+        # Matte obsidian keeps the bezel treatment solid and non-reflective.
+        cr.set_source_rgba(0.07, 0.07, 0.08, 0.99)
         cr.fill_preserve()
 
-        # A single hairline seam makes the edge legible without looking luminous.
-        border_alpha = 0.16 if (self.is_hovered and not self.is_expanded) else 0.09
+        # The seam stays legible against dark desktop backgrounds without glow.
+        border_alpha = 0.22 if (self.is_hovered and not self.is_expanded) else 0.15
         cr.set_source_rgba(1.0, 1.0, 1.0, border_alpha)
         cr.set_line_width(1.0)
         cr.stroke()
